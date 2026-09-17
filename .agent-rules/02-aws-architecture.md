@@ -101,7 +101,7 @@ Each architecture component implements concrete engineering cost controls:
 > Log real operational events. Zero synthetic or hardcoded metrics for demo purposes.
 
 ### Structured Logging
-All Lambda functions and Step Functions tasks emit JSON structured logs with safe correlation context. Allowed fields: `githubDeliveryId`, `eventType`, `action`, `installationId`, `repositoryId`, `issueNumber`, `senderId`, `bodyHash`, `correlationId`, `latency`, `result`, `errorClass`. Private issue bodies, source code, secrets, and raw diff payloads are strictly excluded.
+All Lambda functions and Step Functions tasks emit JSON structured logs with safe correlation context. Allowed fields: `githubDeliveryId`, `eventType`, `action`, `installationId`, `repositoryId`, `issueNumber`, `senderId`, `bodyHash`, `correlationId`, `latencyMs`, `result`, `errorClass`. Private issue bodies, source code, secrets, and raw diff payloads are strictly excluded.
 
 ### CloudWatch EMF Metrics
 Emit real runtime operational metrics via Embedded Metric Format:

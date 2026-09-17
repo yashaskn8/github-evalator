@@ -26,7 +26,7 @@
 ### Webhook Privacy & Safe Structured Telemetry
 - Raw or full webhook payloads must not be logged to CloudWatch.
 - **Allowed structured metadata**:
-  `githubDeliveryId`, `eventType`, `action`, `installationId`, `repositoryId`, `issueNumber`, `senderId`, `bodyHash`, `correlationId`, `latency`, `result`, `errorClass`.
+  `githubDeliveryId`, `eventType`, `action`, `installationId`, `repositoryId`, `issueNumber`, `senderId`, `bodyHash`, `correlationId`, `latencyMs`, `result`, `errorClass`.
 - **Excluded from logs**:
   Full private issue body, full private source code, GitHub private keys, webhook secrets, AWS credentials, raw repository dumps.
 

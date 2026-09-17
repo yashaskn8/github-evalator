@@ -1,16 +1,17 @@
-"""Unit tests for the T01 webhook ingress handler."""
+"""Unit and adversarial tests for the T01 webhook ingress handler."""
 
 import base64
 import hashlib
 import json
 import logging
+from unittest.mock import Mock
 
 import pytest
 
 from src.webhook.handler import lambda_handler, _recover_body_bytes, log_event
 
 
-def _make_event(body_dict=None, body_str=None, headers=None, base64_encode=False):
+def _make_event(body_dict=None, body_str=None, headers=None, base64_encode=False, request_context=True):
     """Build a synthetic API Gateway HTTP API v2 proxy event."""
     if body_dict is not None:
         raw = json.dumps(body_dict)
@@ -20,10 +21,12 @@ def _make_event(body_dict=None, body_str=None, headers=None, base64_encode=False
         raw = ""
 
     event = {
-        "requestContext": {"requestId": "apigw-req-001"},
-        "headers": headers or {},
+        "headers": headers if headers is not None else {},
         "isBase64Encoded": base64_encode,
     }
+    if request_context:
+        event["requestContext"] = {"requestId": "apigw-req-001"}
+
     if base64_encode:
         event["body"] = base64.b64encode(raw.encode("utf-8")).decode("ascii")
     else:
@@ -79,6 +82,7 @@ class TestIssuesEvent:
             result = lambda_handler(event, None)
 
         assert result["statusCode"] == 202
+        assert result["headers"]["Content-Type"] == "application/json"
         assert json.loads(result["body"])["status"] == "accepted"
 
         # Verify structured log contains expected fields
@@ -94,6 +98,7 @@ class TestIssuesEvent:
         assert logged["installationId"] == 111
         assert logged["result"] == "accepted"
         assert "bodyHash" in logged
+        assert "latencyMs" in logged
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -116,6 +121,7 @@ class TestPullRequestEvent:
             result = lambda_handler(event, None)
 
         assert result["statusCode"] == 202
+        assert result["headers"]["Content-Type"] == "application/json"
 
         logged = json.loads(caplog.records[-1].message)
         assert logged["eventType"] == "pull_request"
@@ -123,6 +129,7 @@ class TestPullRequestEvent:
         assert logged["repositoryId"] == 54321
         assert logged["senderId"] == 99999
         assert logged["installationId"] == 222
+        assert logged["issueNumber"] == 88
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -150,6 +157,7 @@ class TestCaseInsensitiveHeaders:
             result = lambda_handler(event, None)
 
         assert result["statusCode"] == 202
+        assert result["headers"]["Content-Type"] == "application/json"
         logged = json.loads(caplog.records[-1].message)
         assert logged["githubDeliveryId"] == "delivery-case-test"
         assert logged["eventType"] == "issues"
@@ -175,6 +183,7 @@ class TestBase64Body:
             result = lambda_handler(event, None)
 
         assert result["statusCode"] == 202
+        assert result["headers"]["Content-Type"] == "application/json"
         logged = json.loads(caplog.records[-1].message)
         assert logged["bodyHash"] == expected_hash
 
@@ -195,6 +204,7 @@ class TestMalformedJson:
             result = lambda_handler(event, None)
 
         assert result["statusCode"] == 400
+        assert result["headers"]["Content-Type"] == "application/json"
         assert json.loads(result["body"])["status"] == "invalid_payload"
 
         # Verify error is logged but the malformed body content is not
@@ -301,9 +311,173 @@ class TestMissingDeliveryHeader:
             result = lambda_handler(event, None)
 
         assert result["statusCode"] == 202
+        assert result["headers"]["Content-Type"] == "application/json"
 
         logged = json.loads(caplog.records[-1].message)
         # correlationId should fall back to the API Gateway request ID
         assert logged["correlationId"] == "apigw-req-001"
         # githubDeliveryId should not appear since it was absent
         assert "githubDeliveryId" not in logged or logged.get("githubDeliveryId") is None
+
+
+# ───────────────────────────────────────────────────────────────────
+# Test 9: Hostile Red-Team Gates (Valid-JSON Non-Object, Empty, Base64, Headers)
+# ───────────────────────────────────────────────────────────────────
+
+
+class TestHostilePayloadShapes:
+    @pytest.mark.parametrize(
+        "non_object_json,description",
+        [
+            ("[]", "JSON array"),
+            ('"hello"', "JSON string"),
+            ("123", "JSON integer"),
+            ("null", "JSON null"),
+            ("true", "JSON boolean"),
+            ("[1, 2, 3]", "JSON integer array"),
+            ('["secret", "data"]', "JSON array with strings"),
+        ],
+    )
+    def test_valid_json_non_object_returns_400_without_crash(self, non_object_json, description, caplog):
+        """JSON values that are valid JSON but not objects must never 5xx or call .get()."""
+        event, _ = _make_event(
+            body_str=non_object_json,
+            headers={"x-github-delivery": "delivery-non-obj", "x-github-event": "issues"},
+        )
+
+        with caplog.at_level(logging.INFO):
+            result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 400
+        assert result["headers"]["Content-Type"] == "application/json"
+        assert json.loads(result["body"])["status"] == "invalid_payload"
+
+        logged = json.loads(caplog.records[-1].message)
+        assert logged["result"] == "invalid_payload"
+        assert logged["errorClass"] == "invalid_json_shape"
+        # Raw input must not be logged
+        assert non_object_json not in caplog.records[-1].message or non_object_json in ('null', '123', 'true')
+        assert "secret" not in caplog.records[-1].message
+
+    def test_empty_string_body_returns_400(self, caplog):
+        """An empty POST body must return 400 empty_body, never 202."""
+        event, _ = _make_event(
+            body_str="",
+            headers={"x-github-delivery": "delivery-empty", "x-github-event": "issues"},
+        )
+
+        with caplog.at_level(logging.INFO):
+            result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 400
+        assert result["headers"]["Content-Type"] == "application/json"
+        assert json.loads(result["body"])["status"] == "invalid_payload"
+
+        logged = json.loads(caplog.records[-1].message)
+        assert logged["result"] == "invalid_payload"
+        assert logged["errorClass"] == "empty_body"
+
+    def test_body_is_none_returns_400(self, caplog):
+        """Missing or None body must return 400 empty_body."""
+        event = {
+            "body": None,
+            "headers": {"x-github-delivery": "delivery-none", "x-github-event": "issues"},
+            "requestContext": {"requestId": "req-none"},
+        }
+
+        with caplog.at_level(logging.INFO):
+            result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 400
+        assert result["headers"]["Content-Type"] == "application/json"
+        assert json.loads(result["body"])["status"] == "invalid_payload"
+
+        logged = json.loads(caplog.records[-1].message)
+        assert logged["errorClass"] == "empty_body"
+
+    def test_invalid_base64_body_returns_400_without_unhandled_exception(self, caplog):
+        """Malformed Base64 input must be cleanly caught and return 400 invalid_base64."""
+        event = {
+            "body": "This-is-NOT-valid-base64!@#$%",
+            "isBase64Encoded": True,
+            "headers": {"x-github-delivery": "delivery-b64-bad", "x-github-event": "issues"},
+            "requestContext": {"requestId": "req-b64-bad"},
+        }
+
+        with caplog.at_level(logging.INFO):
+            result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 400
+        assert result["headers"]["Content-Type"] == "application/json"
+        assert json.loads(result["body"])["status"] == "invalid_payload"
+
+        logged = json.loads(caplog.records[-1].message)
+        assert logged["result"] == "invalid_payload"
+        assert logged["errorClass"] == "invalid_base64"
+        # Malformed body string must not be logged
+        assert "This-is-NOT" not in caplog.records[-1].message
+
+    def test_headers_none_does_not_crash(self, caplog):
+        """headers=None in event must not raise an exception."""
+        body = _issues_opened_body()
+        event = {
+            "headers": None,
+            "body": json.dumps(body),
+            "isBase64Encoded": False,
+            "requestContext": {"requestId": "req-h-none"},
+        }
+
+        with caplog.at_level(logging.INFO):
+            result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 202
+        assert result["headers"]["Content-Type"] == "application/json"
+        logged = json.loads(caplog.records[-1].message)
+        assert logged["correlationId"] == "req-h-none"
+
+    def test_missing_request_context_correlation_fallback(self, caplog):
+        """Missing requestContext should fall back to Lambda context.aws_request_id or 'unknown'."""
+        body = _issues_opened_body()
+        # Event with no delivery header and no requestContext
+        event = {
+            "body": json.dumps(body),
+            "headers": {"x-github-event": "issues"},
+        }
+
+        # Case A: context has aws_request_id
+        mock_context = Mock()
+        mock_context.aws_request_id = "lambda-req-id-777"
+
+        with caplog.at_level(logging.INFO):
+            result = lambda_handler(event, mock_context)
+
+        assert result["statusCode"] == 202
+        logged = json.loads(caplog.records[-1].message)
+        assert logged["correlationId"] == "lambda-req-id-777"
+
+        # Case B: context is None -> falls back to 'unknown'
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            result_none = lambda_handler(event, None)
+
+        assert result_none["statusCode"] == 202
+        logged_none = json.loads(caplog.records[-1].message)
+        assert logged_none["correlationId"] == "unknown"
+
+    def test_error_telemetry_never_contains_private_data(self, caplog):
+        """Adversarial error cases must never leak untrusted data into telemetry."""
+        malicious_input = '{"secret_token": "SUPER_SECRET_VALUE", "payload": [1, 2, 3]}'
+        # In this case, invalid_json_shape is triggered because payload is not root, wait:
+        # let's test a non-object containing secret token:
+        adversarial_json = '["SUPER_SECRET_TOKEN_IN_ARRAY", 999]'
+        event, _ = _make_event(
+            body_str=adversarial_json,
+            headers={"x-github-delivery": "delivery-redteam"},
+        )
+
+        with caplog.at_level(logging.INFO):
+            result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 400
+        for record in caplog.records:
+            assert "SUPER_SECRET_TOKEN_IN_ARRAY" not in record.message

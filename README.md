@@ -116,18 +116,6 @@ Read-Only Evidence / Status API
 - **Repository content is untrusted data**: Issue descriptions, comments, READMEs, and source files are treated as untrusted input and wrapped in explicit delimiters (`<untrusted_contributor_text>` and `<untrusted_repository_content>`). Untrusted text cannot modify system evaluation policy.
 - **Static inspection only**: The MVP performs AST and file tree analysis; it does not execute untrusted contributor code.
 
----
-
-## 3-Minute Demonstration Scenario Summary
-
-- **Alice** posts `"assign me please"` → REJECTED (no technical proposal).
-- **Bob** posts `"I'll fix this in src/client.py"` → NEEDS_REVISION (file exists, but proposal lacks grounded implementation detail and repository evidence does not establish it as the relevant retry path).
-- **Charlie** posts a structured plan referencing `src/retry.py` and `tests/test_retry.py` → VERIFIED by AST inspection (`retry_request confirmed in src/retry.py commit=<actual sha>`). Charlie receives the lease on Issue #42.
-- **Concurrency Verification**: On fresh **Issue #43**, 100 pre-qualified concurrency-test claimants execute parallel DynamoDB conditional transactions → Exactly 1 transaction succeeds, 99 encounter conflict failures.
-- **Proposal-to-PR Integrity Loop**:
-  - Charlie submits a pull request at **Head SHA A** modifying `src/retry.py` and `tests/test_retry.py` → PASS.
-  - Charlie pushes a subsequent commit at **Head SHA B** additionally modifying `billing/stripe.ts` → DRIFT (flagged for maintainer review).
-- **Evidence Dashboard**: The dashboard displays real-time proposal statuses, evidence breakdowns, active leases, and operational counters on the deployed Amplify URL.
 
 ---
 
@@ -183,4 +171,4 @@ docs/
 
 ## Implementation Status
 
-Implementation status: pre-implementation. Architecture, threat model, evaluation cases, and implementation tasks are documented. Product implementation begins with T01.
+T01 webhook ingress is implemented and unit-tested. Live AWS/GitHub verification is pending. T02 and later pipeline stages are not yet implemented.
