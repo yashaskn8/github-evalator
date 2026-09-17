@@ -15,6 +15,7 @@ from src.state.models import (
     format_idempotency_sk,
     is_lease_active,
     build_event_admission_request,
+    build_issue_creation_request,
     build_qualification_request,
     build_verification_run_request,
     build_side_effect_idempotency_request,
@@ -223,7 +224,8 @@ class TestSideEffectIdempotency:
 
 
 class TestWorkerFencingAndMaintainerOverride:
-    def test_fencing_enforces_expected_lease_and_version(self):
+    def test_fencing_enforces_expected_lease_version_and_installation(self):
+        """Fencing condition must always check lease, version, AND installation."""
         req = build_issue_fencing_update_request(
             table_name=TABLE_NAME,
             repo_id=REPO_ID,
@@ -240,11 +242,135 @@ class TestWorkerFencingAndMaintainerOverride:
         assert "#v = :expected_version" in condition
         assert "installationId = :installation_id" in condition
 
+        vals = req["ExpressionAttributeValues"]
+        assert vals[":installation_id"]["N"] == str(INSTALLATION_ID)
+
+    def test_fencing_requires_installation_id_argument(self):
+        """installation_id is a required argument — cannot be omitted."""
+        with pytest.raises(TypeError):
+            build_issue_fencing_update_request(
+                table_name=TABLE_NAME,
+                repo_id=REPO_ID,
+                issue_number=ISSUE_NUMBER,
+                expected_lease_id="lease-001",
+                expected_version=1,
+                new_version=2,
+                # Missing installation_id — must raise TypeError
+            )  # type: ignore
+
+    def test_fencing_installation_condition_always_present(self):
+        """Even for different installation IDs, the condition always checks installationId."""
+        req = build_issue_fencing_update_request(
+            table_name=TABLE_NAME,
+            repo_id=REPO_ID,
+            issue_number=ISSUE_NUMBER,
+            expected_lease_id="lease-xyz",
+            expected_version=5,
+            new_version=6,
+            installation_id=999888,
+        )
+        assert "installationId = :installation_id" in req["ConditionExpression"]
+        assert req["ExpressionAttributeValues"][":installation_id"]["N"] == "999888"
+
+
+class TestIssueCreationContract:
+    def test_issue_creation_uses_atomic_condition(self):
+        """Issue creation must use attribute_not_exists on both PK and SK — no read-check-write."""
+        req = build_issue_creation_request(
+            table_name=TABLE_NAME,
+            installation_id=INSTALLATION_ID,
+            repo_id=REPO_ID,
+            issue_number=ISSUE_NUMBER,
+            created_at=5000.0,
+        )
+        assert req["ConditionExpression"] == "attribute_not_exists(PK) AND attribute_not_exists(SK)"
+        assert req["TableName"] == TABLE_NAME
+
+    def test_issue_creation_persists_required_fields(self):
+        """Created Issue must contain installationId, repositoryId, issueNumber, status, version."""
+        req = build_issue_creation_request(
+            table_name=TABLE_NAME,
+            installation_id=INSTALLATION_ID,
+            repo_id=REPO_ID,
+            issue_number=ISSUE_NUMBER,
+            created_at=5000.0,
+        )
+        item = req["Item"]
+        assert item["PK"]["S"] == f"REPO#{REPO_ID}"
+        assert item["SK"]["S"] == f"ISSUE#{ISSUE_NUMBER}"
+        assert item["installationId"]["N"] == str(INSTALLATION_ID)
+        assert item["repositoryId"]["N"] == str(REPO_ID)
+        assert item["issueNumber"]["N"] == str(ISSUE_NUMBER)
+        assert item["status"]["S"] == "OPEN"
+        assert "version" in item
+
+    def test_issue_creation_initializes_version(self):
+        """Version must be initialized to a consistent value."""
+        req = build_issue_creation_request(
+            table_name=TABLE_NAME,
+            installation_id=INSTALLATION_ID,
+            repo_id=REPO_ID,
+            issue_number=ISSUE_NUMBER,
+        )
+        version = int(req["Item"]["version"]["N"])
+        assert version >= 1  # version = 1 is the initial contract
+
+    def test_issue_creation_has_no_lease_fields(self):
+        """New Issue must NOT have activeLeaseId, assigneeId, or leaseExpiresAt."""
+        req = build_issue_creation_request(
+            table_name=TABLE_NAME,
+            installation_id=INSTALLATION_ID,
+            repo_id=REPO_ID,
+            issue_number=ISSUE_NUMBER,
+        )
+        item = req["Item"]
+        assert "activeLeaseId" not in item
+        assert "assigneeId" not in item
+        assert "leaseExpiresAt" not in item
+
+    def test_duplicate_issue_creation_contract_uses_condition(self):
+        """Same repo + same issue number should produce identical PK/SK;
+        the condition prevents duplicates.
+        """
+        req1 = build_issue_creation_request(
+            table_name=TABLE_NAME,
+            installation_id=INSTALLATION_ID,
+            repo_id=REPO_ID,
+            issue_number=ISSUE_NUMBER,
+        )
+        req2 = build_issue_creation_request(
+            table_name=TABLE_NAME,
+            installation_id=INSTALLATION_ID,
+            repo_id=REPO_ID,
+            issue_number=ISSUE_NUMBER,
+        )
+        # Same PK/SK means DynamoDB condition prevents the second write
+        assert req1["Item"]["PK"]["S"] == req2["Item"]["PK"]["S"]
+        assert req1["Item"]["SK"]["S"] == req2["Item"]["SK"]["S"]
+        assert req1["ConditionExpression"] == "attribute_not_exists(PK) AND attribute_not_exists(SK)"
+
+    def test_different_repo_same_issue_number_has_different_pk(self):
+        """Issue #42 in Repo 100 vs Repo 200 must have different PKs."""
+        req_a = build_issue_creation_request(
+            table_name=TABLE_NAME,
+            installation_id=INSTALLATION_ID,
+            repo_id=100,
+            issue_number=42,
+        )
+        req_b = build_issue_creation_request(
+            table_name=TABLE_NAME,
+            installation_id=INSTALLATION_ID,
+            repo_id=200,
+            issue_number=42,
+        )
+        assert req_a["Item"]["PK"]["S"] != req_b["Item"]["PK"]["S"]
+        assert req_a["Item"]["SK"]["S"] == req_b["Item"]["SK"]["S"]
+
 
 class TestAtomicLeaseAcquisitionAndStrictBinding:
-    def test_lease_acquisition_enforces_issue_existence(self):
+    def test_lease_acquisition_enforces_issue_existence_and_installation(self):
         """A nonexistent Issue must produce conditional write failure;
-        cannot create incomplete issue via lease transaction.
+        Issue update condition must also check installationId.
         """
         tx = build_lease_acquisition_transaction(
             table_name=TABLE_NAME,
@@ -259,10 +385,14 @@ class TestAtomicLeaseAcquisitionAndStrictBinding:
 
         issue_update = tx["TransactItems"][0]["Update"]
         cond = issue_update["ConditionExpression"]
+        vals = issue_update["ExpressionAttributeValues"]
         # Must require that PK and SK already exist
         assert "attribute_exists(PK)" in cond
         assert "attribute_exists(SK)" in cond
         assert "attribute_not_exists(activeLeaseId) OR leaseExpiresAt < :now" in cond
+        # Must also check installationId
+        assert "installationId = :expected_installation" in cond
+        assert vals[":expected_installation"]["N"] == str(INSTALLATION_ID)
 
     def test_qualification_binding_enforces_issue_contributor_sha_installation(self):
         """ConditionExpression must strictly bind:
@@ -371,6 +501,22 @@ class TestAtomicLeaseAcquisitionAndStrictBinding:
         assert "installationId = :expected_installation" in qual_condition
         assert qual_vals[":expected_installation"]["N"] == "999888"
 
+    def test_issue_update_in_lease_also_checks_installation(self):
+        """FIX 2: The Issue mutation in lease acquisition must also check installationId."""
+        tx = build_lease_acquisition_transaction(
+            table_name=TABLE_NAME,
+            installation_id=777666,
+            repo_id=REPO_ID,
+            issue_number=ISSUE_NUMBER,
+            contributor_id=CONTRIBUTOR_ID,
+            base_commit_sha=BASE_COMMIT_SHA,
+            qualification_id="qual-001",
+            lease_id="lease-001",
+        )
+        issue_cond = tx["TransactItems"][0]["Update"]["ConditionExpression"]
+        issue_vals = tx["TransactItems"][0]["Update"]["ExpressionAttributeValues"]
+        assert "installationId = :expected_installation" in issue_cond
+        assert issue_vals[":expected_installation"]["N"] == "777666"
 
 
 class TestNoPlaintextSecretsInStateFixtures:

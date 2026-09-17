@@ -17,6 +17,9 @@ Execution invariants:
 4. Only normalized, bounded metadata is enqueued to SQS; raw payloads, secrets,
    and auth headers are strictly excluded.
 5. Queue send failure returns 503; HTTP 202 is returned ONLY when SQS enqueue succeeds.
+6. Empty, whitespace-only, or non-string secrets fail closed (503).
+7. Event-specific required fields are validated before enqueue.
+8. All normalized identifiers are type-checked and bounded.
 """
 
 import base64
@@ -56,6 +59,12 @@ _ALLOWED_FIELDS = frozenset({
 # Maximum permitted comment body length in bytes for issue_comment events (64 KB)
 MAX_COMMENT_BODY_BYTES = 65536
 
+# Maximum serialized SQS message size in bytes (128 KB, well below AWS 256 KB limit)
+MAX_QUEUE_MESSAGE_BYTES = 131072
+
+# Maximum length for bounded string identifiers (delivery ID, event type, action, SHA)
+MAX_STRING_ID_LENGTH = 1024
+
 # Module-level AWS clients and injection overrides
 _secretsmanager_client = None
 _sqs_client = None
@@ -88,14 +97,24 @@ def _get_webhook_secret() -> Optional[str]:
     Does not cache indefinitely in global memory: retrieves the current secret
     per request to ensure rotation takes effect immediately.
 
+    Returns a usable secret ONLY when SecretString exists, is a string, and is
+    non-empty after stripping whitespace. Empty, whitespace-only, None, or
+    non-string values fail closed (return None).
+
     Returns:
         str | None: The plaintext secret string, or None if unavailable.
     """
     if _secret_provider_override is not None:
         try:
-            return _secret_provider_override()
+            secret_value = _secret_provider_override()
         except Exception:
             return None
+        # Validate even injectable secrets
+        if not isinstance(secret_value, str):
+            return None
+        if not secret_value.strip():
+            return None
+        return secret_value
 
     secret_arn = os.environ.get("GITHUB_WEBHOOK_SECRET_ARN")
     if not secret_arn:
@@ -104,7 +123,12 @@ def _get_webhook_secret() -> Optional[str]:
     try:
         client = _get_secretsmanager_client()
         response = client.get_secret_value(SecretId=secret_arn)
-        return response.get("SecretString")
+        secret_value = response.get("SecretString")
+        if not isinstance(secret_value, str):
+            return None
+        if not secret_value.strip():
+            return None
+        return secret_value
     except (BotoCoreError, ClientError, Exception):
         # Fail closed on any Secrets Manager exception; never leak details
         return None
@@ -213,8 +237,22 @@ def _resolve_preauth_correlation_id(event: Any, context: Any) -> str:
     return "unknown"
 
 
+def _is_positive_int(value: Any) -> bool:
+    """Check if a value is a positive integer (GitHub numeric ID)."""
+    return isinstance(value, int) and value > 0
+
+
+def _is_bounded_string(value: Any, max_length: int = MAX_STRING_ID_LENGTH) -> bool:
+    """Check if a value is a non-empty string within length bounds."""
+    return isinstance(value, str) and 0 < len(value) <= max_length
+
+
 def _extract_safe_metadata(parsed_body: Any) -> Dict[str, Any]:
-    """Extract only safe metadata fields from the parsed webhook body."""
+    """Extract only safe common metadata fields from the parsed webhook body.
+
+    Extracts: action, repositoryId, issueNumber, senderId, installationId.
+    Event-specific fields (commentId, PR identity) are handled separately.
+    """
     meta: Dict[str, Any] = {}
     if not isinstance(parsed_body, dict):
         return meta
@@ -234,12 +272,100 @@ def _extract_safe_metadata(parsed_body: Any) -> Dict[str, Any]:
     return meta
 
 
+def _extract_event_specific_fields(
+    event_type: str,
+    parsed_body: Dict[str, Any],
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Extract and validate event-specific fields for supported event types.
+
+    Returns:
+        tuple[dict | None, str | None]: (extra_fields, error_class).
+        If error_class is set, validation failed and the event must be rejected.
+        If extra_fields is None and error_class is None, the event type has no
+        specific fields (pass-through).
+    """
+    if event_type == "issue_comment":
+        comment_obj = parsed_body.get("comment")
+        if not isinstance(comment_obj, dict):
+            return None, "missing_required_field"
+        comment_id = comment_obj.get("id")
+        if not _is_positive_int(comment_id):
+            return None, "missing_required_field"
+        raw_comment = comment_obj.get("body")
+        if not isinstance(raw_comment, str):
+            return None, "missing_required_field"
+        if len(raw_comment.encode("utf-8")) > MAX_COMMENT_BODY_BYTES:
+            return None, "payload_too_large"
+
+        # Validate required common fields for issue_comment
+        issue = parsed_body.get("issue")
+        if not isinstance(issue, dict) or not _is_positive_int(issue.get("number")):
+            return None, "missing_required_field"
+        installation = parsed_body.get("installation")
+        if not isinstance(installation, dict) or not _is_positive_int(installation.get("id")):
+            return None, "missing_required_field"
+        repo = parsed_body.get("repository")
+        if not isinstance(repo, dict) or not _is_positive_int(repo.get("id")):
+            return None, "missing_required_field"
+        sender = parsed_body.get("sender")
+        if not isinstance(sender, dict) or not _is_positive_int(sender.get("id")):
+            return None, "missing_required_field"
+
+        return {"commentId": comment_id, "commentBody": raw_comment}, None
+
+    elif event_type == "pull_request":
+        pr_obj = parsed_body.get("pull_request")
+        if not isinstance(pr_obj, dict):
+            return None, "missing_required_field"
+        pr_number = pr_obj.get("number")
+        if not _is_positive_int(pr_number):
+            return None, "missing_required_field"
+        head_obj = pr_obj.get("head")
+        if not isinstance(head_obj, dict):
+            return None, "missing_required_field"
+        head_sha = head_obj.get("sha")
+        if not _is_bounded_string(head_sha, 256):
+            return None, "missing_required_field"
+
+        # Validate required common fields for pull_request
+        installation = parsed_body.get("installation")
+        if not isinstance(installation, dict) or not _is_positive_int(installation.get("id")):
+            return None, "missing_required_field"
+        repo = parsed_body.get("repository")
+        if not isinstance(repo, dict) or not _is_positive_int(repo.get("id")):
+            return None, "missing_required_field"
+        sender = parsed_body.get("sender")
+        if not isinstance(sender, dict) or not _is_positive_int(sender.get("id")):
+            return None, "missing_required_field"
+
+        return {"pullRequestNumber": pr_number, "pullRequestHeadSha": head_sha}, None
+
+    elif event_type == "issues":
+        # Validate required common fields for issues
+        issue = parsed_body.get("issue")
+        if not isinstance(issue, dict) or not _is_positive_int(issue.get("number")):
+            return None, "missing_required_field"
+        installation = parsed_body.get("installation")
+        if not isinstance(installation, dict) or not _is_positive_int(installation.get("id")):
+            return None, "missing_required_field"
+        repo = parsed_body.get("repository")
+        if not isinstance(repo, dict) or not _is_positive_int(repo.get("id")):
+            return None, "missing_required_field"
+        sender = parsed_body.get("sender")
+        if not isinstance(sender, dict) or not _is_positive_int(sender.get("id")):
+            return None, "missing_required_field"
+        return {}, None
+
+    # Unknown event types pass through without specific validation
+    return None, None
+
+
 def _build_queue_message(
     github_delivery_id: str,
     event_type: str,
     body_hash: str,
     meta: Dict[str, Any],
-    comment_body: Optional[str],
+    event_specific: Optional[Dict[str, Any]],
     received_at: int,
 ) -> Dict[str, Any]:
     """Build bounded normalized message for downstream SQS dispatch (T04).
@@ -258,9 +384,9 @@ def _build_queue_message(
         "bodyHash": body_hash,
     }
     if meta.get("issueNumber") is not None:
-        msg["issueNumber"] = meta.get("issueNumber")
-    if comment_body is not None:
-        msg["commentBody"] = comment_body
+        msg["issueNumber"] = meta["issueNumber"]
+    if event_specific:
+        msg.update(event_specific)
     return msg
 
 
@@ -299,6 +425,7 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
         return _json_response(400, {"status": "invalid_payload"})
 
     # Step 3: Retrieve webhook secret (fail closed if unavailable; queries SM per request)
+    # Empty, whitespace-only, non-string, or None secrets all fail closed.
     secret = _get_webhook_secret()
     if secret is None:
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
@@ -341,6 +468,18 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
     # Now that HMAC is verified and delivery header is validated, switch to GitHub delivery ID
     correlation_id = str(github_delivery_id)
     event_type_str = str(event_type).strip()
+
+    # Bound string identifiers to prevent arbitrarily large internal values
+    if len(correlation_id) > MAX_STRING_ID_LENGTH or len(event_type_str) > MAX_STRING_ID_LENGTH:
+        elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+        log_event(
+            correlationId=preauth_correlation_id,
+            latencyMs=elapsed_ms,
+            result="invalid_payload",
+            errorClass="identifier_too_large",
+        )
+        return _json_response(400, {"status": "invalid_payload"})
+
     body_hash = "sha256:" + hashlib.sha256(raw_bytes).hexdigest()
 
     # Step 6: Parse body as JSON from raw bytes
@@ -373,29 +512,24 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
         )
         return _json_response(400, {"status": "invalid_payload"})
 
-    # Step 8: Extract safe metadata from authenticated and validated object
+    # Step 8: Extract safe common metadata from authenticated and validated object
     meta = _extract_safe_metadata(parsed_body)
 
-    # Step 9: If issue_comment, extract proposal text with enforced size bound
-    comment_body: Optional[str] = None
-    if event_type_str == "issue_comment":
-        comment_obj = parsed_body.get("comment")
-        if isinstance(comment_obj, dict):
-            raw_comment = comment_obj.get("body")
-            if isinstance(raw_comment, str):
-                if len(raw_comment.encode("utf-8")) > MAX_COMMENT_BODY_BYTES:
-                    elapsed_ms = int((time.perf_counter() - start_time) * 1000)
-                    log_event(
-                        correlationId=correlation_id,
-                        githubDeliveryId=correlation_id,
-                        eventType=event_type_str,
-                        bodyHash=body_hash,
-                        latencyMs=elapsed_ms,
-                        result="invalid_payload",
-                        errorClass="payload_too_large",
-                    )
-                    return _json_response(400, {"status": "payload_too_large"})
-                comment_body = raw_comment
+    # Step 9: Validate and extract event-specific fields
+    event_specific, event_error = _extract_event_specific_fields(event_type_str, parsed_body)
+    if event_error is not None:
+        status_label = "payload_too_large" if event_error == "payload_too_large" else "invalid_webhook"
+        elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+        log_event(
+            correlationId=correlation_id,
+            githubDeliveryId=correlation_id,
+            eventType=event_type_str,
+            bodyHash=body_hash,
+            latencyMs=elapsed_ms,
+            result="invalid_payload",
+            errorClass=event_error,
+        )
+        return _json_response(400, {"status": status_label})
 
     # Step 10: Build bounded normalized message for SQS
     queue_message = _build_queue_message(
@@ -403,9 +537,25 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
         event_type=event_type_str,
         body_hash=body_hash,
         meta=meta,
-        comment_body=comment_body,
+        event_specific=event_specific,
         received_at=received_at,
     )
+
+    # Step 10b: Enforce total serialized message size bound
+    message_body = json.dumps(queue_message)
+    message_bytes = len(message_body.encode("utf-8"))
+    if message_bytes > MAX_QUEUE_MESSAGE_BYTES:
+        elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+        log_event(
+            correlationId=correlation_id,
+            githubDeliveryId=correlation_id,
+            eventType=event_type_str,
+            bodyHash=body_hash,
+            latencyMs=elapsed_ms,
+            result="invalid_payload",
+            errorClass="payload_too_large",
+        )
+        return _json_response(400, {"status": "payload_too_large"})
 
     # Step 11: Enqueue normalized event to SQS Standard Queue (T04)
     queue_url = os.environ.get("EVENT_QUEUE_URL")
@@ -426,7 +576,7 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
         sqs = _get_sqs_client()
         sqs.send_message(
             QueueUrl=queue_url,
-            MessageBody=json.dumps(queue_message),
+            MessageBody=message_body,
         )
     except (BotoCoreError, ClientError, Exception):
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
@@ -458,4 +608,3 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
     )
 
     return _json_response(202, {"status": "accepted"})
-

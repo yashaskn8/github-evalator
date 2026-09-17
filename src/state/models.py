@@ -117,6 +117,42 @@ def build_event_admission_request(
     }
 
 
+def build_issue_creation_request(
+    table_name: str,
+    installation_id: int,
+    repo_id: int,
+    issue_number: int,
+    created_at: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Build atomic PutItem request creating an Issue entity.
+
+    Creates the canonical Issue record with initial state.
+    Does NOT initialize activeLeaseId, assigneeId, or leaseExpiresAt;
+    those are set only by lease acquisition.
+
+    Condition: attribute_not_exists(PK) AND attribute_not_exists(SK)
+    prevents duplicate Issue creation without read-check-write.
+    """
+    now = created_at if created_at is not None else time.time()
+    pk = format_issue_pk(repo_id)
+    sk = format_issue_sk(issue_number)
+    return {
+        "TableName": table_name,
+        "Item": {
+            "PK": {"S": pk},
+            "SK": {"S": sk},
+            "installationId": {"N": str(installation_id)},
+            "repositoryId": {"N": str(repo_id)},
+            "issueNumber": {"N": str(issue_number)},
+            "status": {"S": "OPEN"},
+            "version": {"N": "1"},
+            "createdAt": {"N": str(int(now))},
+            "updatedAt": {"N": str(int(now))},
+        },
+        "ConditionExpression": "attribute_not_exists(PK) AND attribute_not_exists(SK)",
+    }
+
+
 def build_qualification_request(
     table_name: str,
     installation_id: int,
@@ -248,27 +284,30 @@ def build_issue_fencing_update_request(
     expected_lease_id: str,
     expected_version: int,
     new_version: int,
-    installation_id: Optional[int] = None,
+    installation_id: int,
     updated_at: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Build UpdateItem request enforcing worker lease and version fencing.
+    """Build UpdateItem request enforcing worker lease, version, and installation fencing.
     
-    Fails closed if activeLeaseId or version has changed (e.g. maintainer override
-    or reassigned lease).
+    Installation ID is REQUIRED — every authoritative fencing mutation must
+    enforce tenant isolation. Fails closed if activeLeaseId, version, or
+    installationId has changed (e.g. maintainer override or reassigned lease).
     """
     now = updated_at if updated_at is not None else time.time()
     pk = format_issue_pk(repo_id)
     sk = format_issue_sk(issue_number)
-    condition = "activeLeaseId = :expected_lease_id AND #v = :expected_version"
+    condition = (
+        "activeLeaseId = :expected_lease_id AND "
+        "#v = :expected_version AND "
+        "installationId = :installation_id"
+    )
     expr_vals: Dict[str, Any] = {
         ":expected_lease_id": {"S": expected_lease_id},
         ":expected_version": {"N": str(expected_version)},
         ":new_version": {"N": str(new_version)},
         ":updated_at": {"N": str(int(now))},
+        ":installation_id": {"N": str(installation_id)},
     }
-    if installation_id is not None:
-        condition += " AND installationId = :installation_id"
-        expr_vals[":installation_id"] = {"N": str(installation_id)}
 
     return {
         "TableName": table_name,
@@ -302,6 +341,7 @@ def build_lease_acquisition_transaction(
     
     Guarantees:
     1. Issue entity MUST ALREADY EXIST (attribute_exists(PK) AND attribute_exists(SK))
+       AND must belong to the expected installation
        AND must be unassigned OR existing lease has expired.
     2. Qualification MUST MATCH EXACTLY (issueNumber, contributorId, baseCommitSha, installationId),
        must be VERIFIED, and must be unconsumed.
@@ -324,7 +364,7 @@ def build_lease_acquisition_transaction(
     return {
         "TransactItems": [
             # 1. Update Issue with lease acquisition & version increment
-            # Requires that the Issue already exists (attribute_exists)
+            # Requires that the Issue already exists AND belongs to expected installation
             {
                 "Update": {
                     "TableName": table_name,
@@ -341,6 +381,7 @@ def build_lease_acquisition_transaction(
                     ),
                     "ConditionExpression": (
                         "attribute_exists(PK) AND attribute_exists(SK) AND "
+                        "installationId = :expected_installation AND "
                         "(attribute_not_exists(activeLeaseId) OR leaseExpiresAt < :now)"
                     ),
                     "ExpressionAttributeNames": {
@@ -353,6 +394,7 @@ def build_lease_acquisition_transaction(
                         ":now": {"N": str(int(now))},
                         ":zero": {"N": "0"},
                         ":one": {"N": "1"},
+                        ":expected_installation": {"N": str(installation_id)},
                     },
                 }
             },
