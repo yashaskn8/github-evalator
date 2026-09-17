@@ -4,9 +4,20 @@
 
 ---
 
-## 1. Structured Logging & Correlation IDs
+## 1. Structured Logging & Webhook Privacy (Fix B)
 
-All Lambda functions, Step Functions tasks, and verifier components must emit JSON structured logs containing the full correlation context:
+All Lambda functions, Step Functions tasks, and verifier components must emit JSON structured logs containing safe correlation context.
+
+### Allowed Structured Metadata
+`githubDeliveryId`, `eventType`, `action`, `installationId`, `repositoryId`, `issueNumber`, `senderId`, `bodyHash`, `correlationId`, `latency`, `result`, `errorClass`.
+
+### Strictly Forbidden in Logs
+- Full private issue bodies or contributor comments.
+- Full private repository source files or AST code dumps.
+- GitHub App private keys (PEM).
+- Webhook HMAC secrets or secret values.
+- AWS credentials or IAM session tokens.
+- Raw diff payloads beyond file path and symbol summaries.
 
 ```json
 {
@@ -26,9 +37,9 @@ All Lambda functions, Step Functions tasks, and verifier components must emit JS
   },
   "message": "Deterministic verification completed",
   "details": {
-    "supportedClaims": 3,
+    "supportedClaims": 2,
     "contradictedClaims": 0,
-    "verdict": "ACCEPTED"
+    "verdict": "VERIFIED"
   }
 }
 ```
@@ -41,11 +52,14 @@ Emit real runtime operational metrics via CloudWatch EMF:
 
 - **Ingestion & Latency**: `WebhookLatency`, `VerificationLatency`, `BedrockLatency`, `QueueDepth`.
 - **System Reliability**: `GitHubApiFailureRate`, `WorkflowRetryCount`, `LeaseConflicts`, `DuplicateAssignmentAttempts`.
-- **Domain Outcomes**: `ProposalsVerified`, `ProposalsRejected`, `HumanEscalations`, `ExpiredLeases`, `ProposalPRDrift`, `UnsupportedClaimRate`.
+- **Domain Outcomes**: `ProposalsVerified`, `ProposalsNeedsRevision`, `HumanEscalations`, `ExpiredLeases`, `ProposalPRDrift`.
+
+### Concurrency Race Proof (Fix O)
+Observability instruments all production components (T01–T11). The `LeaseConflicts` EMF metric verifies that the 100-worker concurrency race produced exactly 99 conflicts.
 
 ---
 
-## 3. Decision Auditability & Data Privacy Gate
+## 3. Decision Auditability Gate
 
-1. **Reconstructibility**: Every system decision (lease grant, proposal rejection, PR drift flag) MUST be fully reconstructible by combining persisted evidence records (in S3/DynamoDB) with correlated CloudWatch operational logs using `verificationId` or `githubDeliveryId`.
-2. **Data Privacy in Logs**: CloudWatch logs must strictly contain correlation IDs, timing metrics, and outcome classifications. **NEVER** log raw private repository source files, full diff dumps, GitHub App private keys, webhook HMAC secrets, or AWS credentials.
+1. **Reconstructibility**: Every system decision (lease grant, proposal revision, PR drift flag) MUST be fully reconstructible by combining persisted evidence records (in S3/DynamoDB) with correlated CloudWatch operational logs using `verificationId` or `githubDeliveryId`.
+2. **Fail-Closed on Telemetry Failures**: Observability failures must not alter authoritative DynamoDB state transitions.

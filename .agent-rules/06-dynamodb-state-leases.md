@@ -8,15 +8,27 @@
 
 | Entity | Partition Key (PK) | Sort Key (SK) | Core Attributes |
 | :--- | :--- | :--- | :--- |
+| **Event Admission** | `EVENT#<deliveryId>` | `METADATA` | `admittedAt`, `eventType`, `status`, `workflowExecutionArn` |
 | **Issue** | `REPO#<repoId>` | `ISSUE#<issueNum>` | `status`, `activeLeaseId`, `assigneeId`, `leaseExpiresAt`, `version` |
 | **Lease** | `REPO#<repoId>#ISSUE#<issueNum>` | `LEASE#<leaseId>` | `contributorId`, `status`, `leaseExpiresAt`, `qualificationId` |
 | **Qualification** | `REPO#<repoId>` | `QUAL#<qualId>` | `issueNum`, `contributorId`, `commitSha`, `status`, `consumedAt` |
 | **VerificationRun** | `REPO#<repoId>` | `VER#<verId>` | `issueNum`, `claims`, `evidence`, `verdict`, `timestamp` |
-| **SideEffect** | `IDEMPOTENCY` | `KEY#<idempotencyKey>` | `target`, `status`, `executedAt`, `responsePayload` |
+| **SideEffect (Idempotency)** | `IDEMPOTENCY` | `KEY#<idempotencyKey>` | `target`, `status`, `executedAt`, `responsePayload` |
 
 ---
 
-## 2. Atomic Transitions for Authoritative State
+## 2. Atomic Event Admission & Webhook Deduplication (Fix A)
+
+During Dispatcher execution (T05), webhook duplicate detection is performed atomically:
+```text
+PutItem with ConditionExpression: "attribute_not_exists(PK)" on EVENT#<deliveryId>
+```
+- First delivery succeeds and triggers Step Functions workflow.
+- Duplicate deliveries fail with `ConditionalCheckFailedException` and are safely dropped without errors or duplicated workflows.
+
+---
+
+## 3. Atomic Transitions for Authoritative State
 
 All authoritative, concurrency-sensitive state transitions (lease acquisition, renewal, revocation, qualification consumption, issue ownership, stale-worker fencing, maintainer override handling) MUST use `TransactWriteItems` or conditional writes.
 
@@ -34,9 +46,14 @@ FORBIDDEN ANTI-PATTERN:
       dynamodb.put_item(...) # RACE CONDITION: Concurrently executing worker can assign in between
 ```
 
+### Concurrency Race Verification (Fix K & Fix O)
+- Verified on fresh Issue #43: 100 parallel worker transactions targeting the issue simultaneously.
+- **T08 Proof**: 100 transactions, 1 success, 99 conditional failures (`TransactionCanceledException`), exactly 1 active lease.
+- **T12/T13 Observability**: Proves CloudWatch `LeaseConflicts` metric equals 99.
+
 ---
 
-## 3. Stale-Worker Fencing & Maintainer Override Protection
+## 4. Stale-Worker Fencing & Maintainer Override Protection
 
 Every subsequent mutation to an active lease or issue MUST enforce version fencing:
 ```text
@@ -47,7 +64,7 @@ ConditionExpression: "activeLeaseId = :expectedLeaseId AND version = :expectedVe
 
 ---
 
-## 4. Lease Expiry Semantics
+## 5. Lease Expiry Semantics
 
 - **Authoritative Authorization Logic**: All backend policy code MUST compare `now() < leaseExpiresAt`.
 - **DynamoDB TTL**: The `ttl` attribute is strictly for low-cost background garbage collection. Never rely on TTL deletion for authorization logic.

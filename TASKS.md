@@ -1,211 +1,229 @@
 # Implementation Tasks — GitHub Evalator
 
 > **Rule**: Do not begin the next task until the current task's relevant eval/red-team gate passes.
+> **Priority Guidance**:
+> - **P0** — Must work for hackathon submission.
+> - **P1** — Should work if P0 is complete. If time is short, **CUT P1**. Never weaken P0.
+> - **P2** — Post-hackathon / out of scope.
 
 ---
 
-## T01 — GitHub App + Webhook Ingress
+## T01 [P0] — GitHub App + API Gateway + Webhook Ingress
 
 - [ ] NOT STARTED
 
 | Field | Value |
 | :--- | :--- |
-| **Goal** | Create a GitHub App, configure webhook events (`issues`, `issue_comment`, `pull_request`), and deploy an API Gateway + Lambda endpoint to receive webhooks. |
-| **Dependencies** | None (first task). |
-| **Rules to Consult** | `01-core-invariants.md`, `03-github-webhooks.md` |
-| **Output** | Working GitHub App; API Gateway endpoint receiving webhook POST requests; Lambda function logging payloads. |
-| **Relevant Evals** | — |
-| **Red-Team Gate** | Lambda receives and logs a real webhook from GitHub. |
-| **Definition of Done** | Real GitHub webhook delivered to API Gateway → Lambda invoked → payload logged in CloudWatch. |
+| **Goal** | Create GitHub App registration, configure webhook events (`issues`, `issue_comment`, `pull_request`), deploy API Gateway HTTP/REST endpoint and minimal Webhook Lambda. |
+| **Dependencies** | None (initial ingress task). |
+| **Rules to Consult** | `01-core-invariants.md`, `03-github-webhooks.md`, `12-hackathon-scope.md` |
+| **Output** | Working GitHub App; API Gateway endpoint routing POST to Lambda; minimal Lambda handler returning HTTP 202; safe structured telemetry logging. |
+| **Relevant Evals** | Webhook connectivity check. |
+| **Red-Team Gate** | Deliver real signed GitHub webhook; Lambda extracts headers, acknowledges within sub-second SLO, and emits safe structured telemetry. |
+| **Definition of Done** | Real GitHub webhook → API Gateway → Lambda → safe structured telemetry visible in CloudWatch. **No raw or private payload logged.** |
 
 ---
 
-## T02 — Webhook HMAC Verification + Delivery Identity
+## T02 [P0] — HMAC Verification + Raw-Body Signature + Delivery Extraction
 
 - [ ] NOT STARTED
 
 | Field | Value |
 | :--- | :--- |
-| **Goal** | Validate `X-Hub-Signature-256` HMAC-SHA256 signature. Extract `X-GitHub-Delivery` GUID. Store delivery ID for idempotency. Reject invalid/replayed requests. |
+| **Goal** | Implement constant-time `X-Hub-Signature-256` HMAC-SHA256 signature verification using secret ARN from AWS Secrets Manager. Extract `X-GitHub-Delivery` GUID and normalize event payload. |
 | **Dependencies** | T01 |
 | **Rules to Consult** | `01-core-invariants.md`, `03-github-webhooks.md`, `08-security-threat-model.md` |
-| **Output** | HMAC verification logic; delivery ID idempotency guard in DynamoDB; invalid webhooks return `401`. |
-| **Relevant Evals** | E07 |
-| **Red-Team Gate** | Send forged payload → `401`. Send same delivery ID 10× → exactly 1 admitted. |
-| **Definition of Done** | Forged webhook rejected. Duplicate delivery ID deduplicated. Real webhook admitted and logged. |
+| **Output** | Cryptographic verification module; extraction of correlation IDs (`githubDeliveryId`); rejection of invalid signatures with HTTP 401. |
+| **Relevant Evals** | E-manual (forged webhook rejection). |
+| **Red-Team Gate** | Send payload with forged signature → immediate HTTP 401. Valid signature → HTTP 202. |
+| **Definition of Done** | Forged signature rejected with 401. Valid signature admitted. Delivery GUID and event metadata normalized. Zero plaintext secrets in code or logs. |
 
 ---
 
-## T03 — DynamoDB Base Domain Model
+## T03 [P0] — DynamoDB Authoritative State Model
 
 - [ ] NOT STARTED
 
 | Field | Value |
 | :--- | :--- |
-| **Goal** | Create single-table DynamoDB schema supporting: Issue, Lease, Qualification, VerificationRun, SideEffect (idempotency) entities. |
+| **Goal** | Create single-table DynamoDB schema supporting: Event admission (`EVENT#<deliveryId>`), Issue, Lease, Qualification, VerificationRun, and SideEffect (idempotency) entities. |
 | **Dependencies** | T01 |
 | **Rules to Consult** | `01-core-invariants.md`, `06-dynamodb-state-leases.md` |
-| **Output** | DynamoDB table definition (CDK or SAM); entity key schema documented; seed test scripts. |
-| **Relevant Evals** | — |
-| **Red-Team Gate** | Schema supports all entity types; conditional write expressions parse correctly. |
-| **Definition of Done** | Table deployed. PutItem/GetItem for each entity type succeeds. Key schema matches `06-dynamodb-state-leases.md`. |
+| **Output** | DynamoDB table definition (IaC); single-table partition/sort key schema; entity types and conditional write expressions. |
+| **Relevant Evals** | Table contract validation. |
+| **Red-Team Gate** | Verify conditional expressions and transactional schemas for all entities without read-check-write flaws. |
+| **Definition of Done** | Table deployed. PutItem/GetItem/TransactWriteItems expressions validated for each entity type. Key schema strictly matches `06-dynamodb-state-leases.md`. |
 
 ---
 
-## T04 — SQS Queue + Dead-Letter Queue
+## T04 [P0] — Amazon SQS Standard + Dead-Letter Queue (DLQ)
 
 - [ ] NOT STARTED
 
 | Field | Value |
 | :--- | :--- |
-| **Goal** | Create SQS queue (with DLQ) for webhook event buffering. Wire Webhook Lambda to enqueue events. |
-| **Dependencies** | T02 |
-| **Rules to Consult** | `01-core-invariants.md`, `02-aws-architecture.md` |
-| **Output** | SQS queue + DLQ; Webhook Lambda enqueues validated events; DLQ alarm configured. |
-| **Relevant Evals** | E16 |
-| **Red-Team Gate** | Poison message → DLQ after retry exhaustion. Healthy message → processed. |
-| **Definition of Done** | Validated webhook → SQS. Poison message → DLQ. CloudWatch alarm fires on DLQ depth. |
+| **Goal** | Provision Amazon SQS Standard queue and Dead-Letter Queue (DLQ). Configure Webhook Lambda to enqueue validated normalized events to SQS Standard. |
+| **Dependencies** | T02, T03 |
+| **Rules to Consult** | `01-core-invariants.md`, `02-aws-architecture.md`, `03-github-webhooks.md` |
+| **Output** | SQS Standard queue + DLQ (`maxReceiveCount = 3`); Webhook Lambda enqueues normalized events with correlation attributes. |
+| **Relevant Evals** | E16 (poison message isolation). |
+| **Red-Team Gate** | Simulate poison event → retried and isolated into DLQ without blocking main queue. Valid message → enqueued within sub-second latency. |
+| **Definition of Done** | Validated webhook → SQS Standard. Poison message moves to DLQ after exhaustion. SQS provides burst buffering; authoritative deduplication explicitly reserved for T05. |
 
 ---
 
-## T05 — Step Functions Skeleton
+## T05 [P0] — Dispatcher Lambda + Atomic Event Admission
 
 - [ ] NOT STARTED
 
 | Field | Value |
 | :--- | :--- |
-| **Goal** | Create Step Functions Standard state machine with placeholder states matching the proposal verification workflow stages. Wire Dispatcher Lambda to trigger workflow from SQS. |
-| **Dependencies** | T04 |
-| **Rules to Consult** | `01-core-invariants.md`, `07-step-functions-workflows.md` |
-| **Output** | State machine definition with stages: LOAD_CONTEXT → PARSE_PROPOSAL → RETRIEVE_EVIDENCE → EXTRACT_CLAIMS → VERIFY_CLAIMS → POLICY_EVALUATION → DECISION → OPTIONAL_LEASE → GITHUB_SIDE_EFFECT. Dispatcher Lambda triggered by SQS. |
-| **Relevant Evals** | — |
-| **Red-Team Gate** | SQS message triggers Step Functions execution. All stages visited in order. Execution visible in console. |
-| **Definition of Done** | End-to-end flow: Webhook → SQS → Dispatcher → Step Functions execution started and completed with placeholder Pass states. |
+| **Goal** | Implement Dispatcher Lambda triggered by SQS Standard. Perform atomic event admission in DynamoDB (`attribute_not_exists(PK)` on `EVENT#<deliveryId>`). Safely drop duplicate deliveries and start exactly one Step Functions workflow. |
+| **Dependencies** | T03, T04 |
+| **Rules to Consult** | `01-core-invariants.md`, `03-github-webhooks.md`, `06-dynamodb-state-leases.md`, `07-step-functions-workflows.md` |
+| **Output** | Dispatcher Lambda; atomic delivery admission logic; duplicate drop logic; Step Functions invocation trigger. |
+| **Relevant Evals** | E07 (10 duplicate deliveries produce 1 logical execution). |
+| **Red-Team Gate** | Send identical delivery ID 10× concurrently → exactly 1 admission succeeds, 9 safely dropped as duplicates. Zero duplicate Step Functions workflows. |
+| **Definition of Done** | Delivery deduplication proven via DynamoDB conditional writes. Duplicate webhooks do not fail auth or crash, but safely drop redundant processing. |
 
 ---
 
-## T06 — Bedrock Structured Proposal Parser
+## T06 [P0] — Bedrock Structured Proposal Parser
 
 - [ ] NOT STARTED
 
 | Field | Value |
 | :--- | :--- |
-| **Goal** | Implement the EXTRACT_CLAIMS Step Functions task. Invoke Bedrock with structured prompt; parse JSON output via schema validation; extract typed claims. |
+| **Goal** | Implement Bedrock claim extraction task using `bedrock-runtime` with native JSON Schema structured output (Claude Sonnet 4.6 or configurable active model). Wrap untrusted input in delimiters. |
 | **Dependencies** | T05 |
 | **Rules to Consult** | `01-core-invariants.md`, `04-bedrock-ai-boundary.md` |
-| **Output** | Lambda invoking Bedrock with untrusted text delimiters; Pydantic/JSON Schema validation; structured claims array. |
+| **Output** | Lambda function with T06 preflight (verifies model availability and structured output support); invokes Bedrock Converse/InvokeModel with JSON Schema; validates structured claims. |
 | **Relevant Evals** | E04, E05, E06, E15 |
-| **Red-Team Gate** | Prompt injection in issue → claims extracted but no policy override. Malformed JSON → validation error, no state transition. |
-| **Definition of Done** | Real Bedrock call returns structured claims. Schema validation catches malformed output. Prompt injection text parsed without altering system behavior. |
+| **Red-Team Gate** | T06 preflight fails visibly if model unavailable. Prompt injection test (E04) extracts technical claims without executing attacker instructions. Malformed JSON caught by schema validation. |
+| **Definition of Done** | Real Bedrock call returns typed structured claims (`affected_files`, `target_symbols`, `test_strategy`). Preflight passes. Prompt injections isolated in `<untrusted_contributor_text>`. |
 
 ---
 
-## T07 — Deterministic Repository Verifier
+## T07 [P0] — Deterministic Repository Verifier + Qualification Policy
 
 - [ ] NOT STARTED
 
 | Field | Value |
 | :--- | :--- |
-| **Goal** | Implement the VERIFY_CLAIMS Step Functions task. Independently inspect Git tree for file existence, symbol presence, test infrastructure. Output granular evidence records. |
+| **Goal** | Implement two separate pipeline components: (1) Deterministic Repository Verifier (Python AST static parser, language-independent Git tree inspector), and (2) Qualification Policy Engine. |
 | **Dependencies** | T06 |
 | **Rules to Consult** | `01-core-invariants.md`, `05-repository-verifier.md` |
-| **Output** | Lambda that checks Git tree/AST at pinned commit SHA; produces per-claim `SUPPORTED`/`CONTRADICTED`/`UNKNOWN` evidence records with provenance. |
+| **Output** | Verifier module producing evidence records (`SUPPORTED`, `CONTRADICTED`, `UNKNOWN`) with pinned commit SHA; Policy engine module producing decision (`VERIFIED`, `NEEDS_REVISION`, `ESCALATED`). |
 | **Relevant Evals** | E01, E02, E03, E06 |
-| **Red-Team Gate** | Nonexistent file → `CONTRADICTED`. Real file, wrong symbol → `CONTRADICTED`. Real file, real symbol → `SUPPORTED`. Bedrock hallucination overridden. |
-| **Definition of Done** | Verifier independently confirms/denies every Bedrock claim against actual repository state. Evidence records include commit SHA, file path, symbol match. |
+| **Red-Team Gate** | Nonexistent file → `CONTRADICTED`. Real file, missing symbol → `CONTRADICTED`. Real file and symbol → `SUPPORTED`. Conservative policy: `VERIFIED` only if required claims supported and target bound. AI confidence alone never yields `VERIFIED`. |
+| **Definition of Done** | Independent static analysis against real repository tree/AST. Granular evidence records stored with commit provenance. Policy engine strictly gates qualification. Zero contributor code execution. |
 
 ---
 
-## T08 — Atomic Qualification + Lease Transaction
+## T08 [P0] — Atomic Qualification + Lease Transaction
 
 - [ ] NOT STARTED
 
 | Field | Value |
 | :--- | :--- |
-| **Goal** | Implement DynamoDB `TransactWriteItems` for atomic lease acquisition: verify qualification → consume qualification → create lease → update issue → all in one transaction. |
+| **Goal** | Implement DynamoDB `TransactWriteItems` for atomic lease acquisition: verify qualification is `VERIFIED` & unconsumed → mark consumed → create Lease record → update Issue `activeLeaseId` and increment `version` in a single transaction. Enforce maintainer fencing. |
 | **Dependencies** | T03, T07 |
 | **Rules to Consult** | `01-core-invariants.md`, `06-dynamodb-state-leases.md` |
-| **Output** | Atomic transaction logic with conditional expressions; stale-worker fencing; version incrementing. |
-| **Relevant Evals** | E08, E09 |
-| **Red-Team Gate** | 100 concurrent workers → exactly 1 lease. Stale worker → conditional write fails. No read-check-write pattern. |
-| **Definition of Done** | 100-worker concurrency test passes. Stale-worker fencing verified. Zero double-assignments. |
+| **Output** | Atomic transaction logic; conditional check expressions; stale-worker fencing; maintainer version check. |
+| **Relevant Evals** | E08 (100 concurrent claims), E09 (stale worker fencing), E13 (maintainer override). |
+| **Red-Team Gate** | 100 concurrent workers on fresh Issue #43 attempt lease acquisition → exactly 1 succeeds, 99 fail with `TransactionCanceledException`. Stale worker fails conditional write. |
+| **Definition of Done** | 100-worker concurrency proof: 100 transactions, 1 success, 99 conditional failures, exactly 1 active lease. Zero double-assignments. Fencing preserves maintainer authority. |
 
 ---
 
-## T09 — GitHub Assignment Side Effect
+## T09 [P0] — GitHub Assignment Side Effect (Idempotent)
 
 - [ ] NOT STARTED
 
 | Field | Value |
 | :--- | :--- |
-| **Goal** | Implement idempotent GitHub issue assignment and evaluation comment posting. Handle timeout-after-success via external state reconciliation. |
+| **Goal** | Implement idempotent GitHub issue assignment and evidence breakdown comment posting. Protect all external calls with internal DynamoDB idempotency records. Handle timeout-after-success via external state reconciliation. |
 | **Dependencies** | T08 |
 | **Rules to Consult** | `01-core-invariants.md`, `03-github-webhooks.md` |
-| **Output** | Lambda calling GitHub API with internal idempotency records; pre-flight external state check on retry. |
-| **Relevant Evals** | E10 |
-| **Red-Team Gate** | Timeout-after-success → retry reconciles without duplicate. Idempotency key prevents duplicate comment. |
-| **Definition of Done** | Real GitHub assignment. Real evaluation comment. Timeout retry produces zero duplicates. |
+| **Output** | Lambda calling GitHub REST API; pre-flight external check on retry; evidence markdown formatter; idempotency record persistence. |
+| **Relevant Evals** | E10 (timeout-after-success reconciliation). |
+| **Red-Team Gate** | Simulate network timeout after successful GitHub call → retry reconciles without creating duplicate comments or duplicate assignments. |
+| **Definition of Done** | Real GitHub issue assigned. Real structured evidence comment posted. Timeout retry produces zero duplicate side effects. |
 
 ---
 
-## T10 — PR Integrity Workflow
+## T10 [P0] — PR Integrity Workflow
 
 - [ ] NOT STARTED
 
 | Field | Value |
 | :--- | :--- |
-| **Goal** | Implement PR verification state machine: load verified intent → load PR diff → deterministic file check → Bedrock semantic comparison → policy → PASS/DRIFT/REVIEW. |
+| **Goal** | Implement PR Integrity Step Functions workflow triggered by `pull_request` events. Load verified proposal intent from DynamoDB, inspect unified diff against qualified scope, and evaluate consistency (`PASS` vs `DRIFT`). |
 | **Dependencies** | T07, T09 |
 | **Rules to Consult** | `01-core-invariants.md`, `05-repository-verifier.md`, `11-pr-integrity.md` |
-| **Output** | Step Functions PR workflow; deterministic file scope check; Bedrock semantic diff comparison; GitHub check run / comment posting. |
-| **Relevant Evals** | E11, E12 |
-| **Red-Team Gate** | Matching PR → `PASS`. Divergent PR → `DRIFT`. Ambiguous → `REVIEW`. |
-| **Definition of Done** | Real PR triggers integrity workflow. Matching scope → PASS. Unrelated changes → DRIFT with warning comment. |
+| **Output** | Step Functions PR workflow; deterministic diff scope inspector; semantic diff evaluation; PR comment / check run emitter. |
+| **Relevant Evals** | E11, E12 (Same PR head SHA A `PASS` → head SHA B `DRIFT`). |
+| **Red-Team Gate** | Charlie's PR at commit A (matching files) → `PASS`. Charlie pushes commit B touching unrelated file (`billing/stripe.ts`) → `DRIFT` and maintainer review. |
+| **Definition of Done** | Real PR workflow validates unified diff against original proposal intent. Same-PR drift detected and posted to GitHub. Closes the evaluation loop. |
 
 ---
 
-## T11 — Maintainer Override
+## T11 [P0] — Minimal Judge-Facing Live Dashboard (Amplify Hosting)
 
 - [ ] NOT STARTED
 
 | Field | Value |
 | :--- | :--- |
-| **Goal** | Detect and defer to human maintainer actions. When a maintainer manually reassigns or closes an issue, automated workflows must fail their fencing condition gracefully. |
-| **Dependencies** | T08 |
-| **Rules to Consult** | `01-core-invariants.md`, `06-dynamodb-state-leases.md`, `08-security-threat-model.md` |
-| **Output** | Webhook handler for `issues.assigned` / `issues.unassigned` maintainer events; version increment logic; stale workflow detection. |
-| **Relevant Evals** | E13 |
-| **Red-Team Gate** | Maintainer reassigns → old workflow fails conditional write → maintainer state preserved. |
-| **Definition of Done** | Maintainer override persists. No automation overwrite. Stale workflow halts cleanly. |
+| **Goal** | Deploy minimal React maintainer/evidence dashboard to Amazon Amplify Hosting with a read-only API Gateway endpoint. Provides the required First Commit Ship It live URL. |
+| **Dependencies** | T03, T08, T10 |
+| **Rules to Consult** | `01-core-invariants.md`, `02-aws-architecture.md`, `12-hackathon-scope.md` |
+| **Output** | Static React application hosted on Amplify Hosting; read-only API query Lambda; evidence visualizer (proposal status, claims, active lease, PR integrity, operational counters). |
+| **Relevant Evals** | Live URL accessibility check. |
+| **Red-Team Gate** | Anonymous access or clear judge instructions; dashboard renders real DynamoDB state and evidence without authentication roadblocks. |
+| **Definition of Done** | Live URL accessible. Shows real proposal status, supported/contradicted evidence, active lease owner, PR integrity status, and demo operational counters. Zero vanity bloat. |
 
 ---
 
-## T12 — CloudWatch Observability
+## T12 [P1] — CloudWatch Observability & Operational Alarms
 
 - [ ] NOT STARTED
 
 | Field | Value |
 | :--- | :--- |
-| **Goal** | Implement structured JSON logging with correlation IDs across all Lambdas. Emit CloudWatch EMF metrics for operational visibility. |
-| **Dependencies** | T09 |
+| **Goal** | Instrument all production components (T01–T11) with structured JSON logging and correlation IDs (`githubDeliveryId`, `verificationId`, `leaseId`). Emit CloudWatch EMF metrics for operations and alarm on DLQ depth. |
+| **Dependencies** | T01, T02, T03, T04, T05, T06, T07, T08, T09, T10, T11 (all production components) |
 | **Rules to Consult** | `01-core-invariants.md`, `10-observability.md` |
-| **Output** | Structured logs with `githubDeliveryId`, `verificationId`, `leaseId`, etc. EMF metrics: `WebhookLatency`, `LeaseConflicts`, `ProposalsVerified`, etc. |
-| **Relevant Evals** | — |
-| **Red-Team Gate** | Pick any random `verificationId` → reconstruct full decision from logs + evidence store. |
-| **Definition of Done** | All correlation IDs propagated. Real EMF metrics emitted. Decision auditability verified. No private source code in logs. |
+| **Output** | Correlation propagation across all Lambdas; CloudWatch EMF metrics (`WebhookLatency`, `LeaseConflicts`, `ProposalsVerified`, `IntegrityDrifts`); DLQ depth alarm. |
+| **Relevant Evals** | Proves `LeaseConflicts` metric matches actual observed concurrency test value (99). |
+| **Red-Team Gate** | Random audit of `verificationId` reconstructs entire execution trace. Trace confirms zero private repository code or credentials logged. |
+| **Definition of Done** | All production components instrumented. CloudWatch EMF metrics emitted. `LeaseConflicts` metric matches actual observed race test. |
 
 ---
 
-## T13 — Full End-to-End Hostile Demo Validation
+## T13 [P0] — Full End-to-End Hostile Demo Validation & Submission Checklist
 
 - [ ] NOT STARTED
 
 | Field | Value |
 | :--- | :--- |
-| **Goal** | Execute the complete 3-minute demo scenario (docs/DEMO.md) with real GitHub events, real Bedrock calls, real DynamoDB races, and real CloudWatch metrics. Run all 16 evals. |
-| **Dependencies** | T01–T12 |
-| **Rules to Consult** | `01-core-invariants.md`, `09-testing-red-team.md`, `13-definition-of-done.md` |
-| **Output** | Complete end-to-end run. All evals passing. Demo script executable with real infrastructure. |
-| **Relevant Evals** | E01–E16 |
-| **Red-Team Gate** | Full adversarial attack matrix from `09-testing-red-team.md`. |
-| **Definition of Done** | All 16 evals pass. 3-minute demo reproducible with real data. Zero fake behavior. |
+| **Goal** | Execute the complete ≤3-minute live demo scenario (docs/DEMO.md) on real AWS infrastructure and verify all 16 evaluations (E01–E16). Complete final submission requirements. |
+| **Dependencies** | T01–T11 (P0 core), T12 (P1 if implemented) |
+| **Rules to Consult** | `01-core-invariants.md`, `09-testing-red-team.md`, `12-hackathon-scope.md`, `13-definition-of-done.md` |
+| **Output** | Live demo verification; all evals passing; ≤3-minute demo video recorded; final submission checklist completed. |
+| **Relevant Evals** | E01–E16 complete sweep. |
+| **Red-Team Gate** | Adversarial attack suite passes. Zero fake metrics, zero hardcoded responses, zero mocked production paths. |
+| **Definition of Done** | Working vertical slice verified end-to-end. Video recorded under 3 minutes. All checklist items checked. |
+
+### Final T13 Submission Checklist
+- [ ] repository public
+- [ ] Git history preserved
+- [ ] no secrets committed
+- [ ] live Ship It URL works anonymously or with clear judge instructions
+- [ ] AWS functionality visibly demonstrated
+- [ ] <=3 minute video recorded
+- [ ] problem clearly explained
+- [ ] AWS role clearly explained
+- [ ] writeup completed
+- [ ] AI coding tools disclosed
+- [ ] third-party dependencies credited/licensed
+- [ ] important features visible in video

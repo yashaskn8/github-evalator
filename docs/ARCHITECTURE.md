@@ -16,56 +16,71 @@ Amazon API Gateway (HTTP/REST Endpoint)
 Webhook Lambda (HMAC-SHA256 Verification → Fast SQS Enqueue)
    │
    ▼
-Amazon SQS (Standard Queue + Dead-Letter Queue)
+Amazon SQS Standard + Dead-Letter Queue (DLQ)
    │
    ▼
-Dispatcher Lambda (Event Routing)
+Dispatcher Lambda (Atomic Event Admission via EVENT#<deliveryId> in DynamoDB)
    │
    ▼
 AWS Step Functions Standard (Auditable Orchestration)
-   ├── 1. Repository Retrieval (GitHub Trees/Blobs API → S3 AST Cache)
-   ├── 2. Bedrock Claim Extraction (Structured JSON Schema Output)
-   ├── 3. Deterministic Verifier (File/Symbol/Test Ground-Truth)
-   ├── 4. Policy Evaluation Engine (Threshold & Rule Checks)
+   ├── 1. Repository Retrieval (GitHub Trees/Blobs API)
+   ├── 2. Bedrock Claim Extraction (Structured JSON Schema Output via bedrock-runtime)
+   ├── 3. Deterministic Verifier (Python AST & Git Tree Inspection → SUPPORTED/CONTRADICTED/UNKNOWN)
+   ├── 4. Policy Evaluation Engine (Threshold & Rule Checks → VERIFIED/NEEDS_REVISION/ESCALATED)
    ├── 5. DynamoDB Atomic Lease Acquisition (TransactWriteItems)
    └── 6. GitHub Side Effect (Idempotent Assignment/Comment/Check)
+
+Maintainer / Judge
+   │
+   ▼
+Amazon Amplify Hosting (Ship It Live URL)
+   │
+   ▼
+Minimal React Maintainer / Evidence Dashboard
+   │
+   ▼
+Read-Only Evidence / Status API (API Gateway + Lambda)
 ```
 
-**Supporting Services**: Amazon S3, AWS Secrets Manager, Amazon CloudWatch.
+**Supporting Services**: Amazon DynamoDB, Amazon S3, AWS Secrets Manager, Amazon CloudWatch, Amazon Amplify Hosting.
 
 ---
 
 ## Service Justifications
 
-| Service | Responsibility | Failure Mode It Addresses |
+| Service | Responsibility | Failure Mode / Justification |
 | :--- | :--- | :--- |
-| **API Gateway** | HTTPS ingress for GitHub webhooks. | Provides TLS termination, throttling, and rate limiting at the edge. |
-| **Webhook Lambda** | HMAC-SHA256 signature validation, delivery ID extraction, SQS enqueue. | Isolates fast acknowledgement from downstream processing; prevents synchronous timeout on complex analysis. |
-| **Amazon SQS + DLQ** | At-least-once delivery buffer between ingestion and processing. | Absorbs bursts; DLQ captures poison messages after retry exhaustion; decouples webhook latency from workflow duration. |
-| **Dispatcher Lambda** | Routes SQS events into the correct Step Functions workflow. | Separates event classification from orchestration logic. |
-| **Step Functions Standard** | Staged, auditable orchestration of the full verification pipeline. | Provides visual execution history, built-in retry/catch, and prevents monolithic Lambda anti-patterns. |
-| **Amazon Bedrock** | Structured semantic claim extraction from natural-language proposals. | Converts ambiguous text into falsifiable JSON claims validated by schema before any downstream use. |
-| **Amazon DynamoDB** | Single-table authoritative state: leases, qualifications, issues, idempotency records. | Conditional writes and `TransactWriteItems` prevent read-check-write races and enforce exactly-one-lease. |
-| **Amazon S3** | Immutable evidence storage: raw webhook payloads, AST snapshots, verification records. | Provides durable, cost-effective storage for large payloads exceeding SQS limits and for audit provenance. |
-| **Secrets Manager** | Stores GitHub App private key, webhook HMAC secret, App ID. | Prevents credential leakage; supports rotation without code deployment. |
-| **CloudWatch** | Structured JSON logs with correlation IDs; Embedded Metric Format (EMF) operational metrics. | Enables full decision auditability and real-time operational visibility. |
+| **API Gateway** | HTTPS ingress for GitHub webhooks and dashboard API. | TLS termination, rate limiting, and edge request filtering. |
+| **Webhook Lambda** | Fast HMAC-SHA256 signature validation and SQS enqueue. | Isolates fast sub-second acknowledgement from downstream analysis; prevents GitHub delivery timeouts. |
+| **Amazon SQS Standard + DLQ** | At-least-once delivery buffer and backpressure control. | Absorbs webhook bursts; isolates poison messages to DLQ; decouples ingestion from workflow execution. *(Does NOT provide authoritative deduplication).* |
+| **Dispatcher Lambda** | Atomic delivery admission via DynamoDB `EVENT#<deliveryId>`. | Drops duplicate webhook deliveries safely without auth errors or duplicated Step Functions workflows. |
+| **Step Functions Standard** | Staged, auditable orchestration of verification and PR integrity. | Visual execution traces, built-in retry/catch policies, and state isolation; eliminates monolithic Lambda anti-patterns. |
+| **Amazon Bedrock** | Structured semantic claim extraction from natural language. | Invoked via `bedrock-runtime` with JSON Schema (e.g. Claude Sonnet 4.6); extracts typed claims without holding state authority. |
+| **Deterministic Verifier** | Independent static AST and Git tree ground-truth analysis. | Confirms or contradicts Bedrock claims against actual repository code; eliminates model hallucinations. |
+| **Policy Engine** | Deterministic qualification gating. | Evaluates verifier evidence against strict rules (`VERIFIED` only if concrete claims supported and target bound). |
+| **Amazon DynamoDB** | Single-table authoritative state: events, leases, issues, idempotency. | Conditional writes and `TransactWriteItems` prevent read-check-write races and enforce single-lease ownership. |
+| **Amazon S3** | Data-minimized evidence storage. | Stores only verification evidence bundles, large diffs, and oversized payloads (>256 KB); encrypted and retention-limited. |
+| **AWS Secrets Manager** | GitHub App private key ARN and webhook secret ARN. | Eliminates plaintext secrets; supports zero-downtime rotation. |
+| **Amazon CloudWatch** | Structured JSON logs and EMF operational metrics. | Full decision auditability and real-time operational telemetry. |
+| **Amazon Amplify Hosting** | Static hosting for the minimal judge-facing React dashboard. | **Specifically justified by the First Commit Ship It live URL requirement.** Delivers an accessible URL with near-zero idle cost. |
 
 ---
 
 ## Core Execution Model
 
 ```text
-AI (Bedrock)
-  ↓ structured semantic claims & hypotheses
-Repository Evidence (Git tree, AST, file inspection)
-  ↓ SUPPORTED / CONTRADICTED / UNKNOWN
+AI (Bedrock via bedrock-runtime)
+  ↓ structured semantic claims (JSON Schema)
+Repository Ground-Truth (Python AST & Git Tree)
+  ↓ independent inspection
 Deterministic Verifier
-  ↓ evidence records with provenance
+  ↓ SUPPORTED / CONTRADICTED / UNKNOWN evidence records
 Policy Engine
-  ↓ pass / fail / escalation
-Atomic Authoritative State (DynamoDB Conditional Transaction)
-  ↓ lease grant / rejection
+  ↓ VERIFIED / NEEDS_REVISION / ESCALATED decision
+Atomic Authoritative State (DynamoDB TransactWriteItems)
+  ↓ single-winner lease acquisition
 External Side Effect (GitHub API — Idempotent)
+  ↓ assignment + evidence comment
 ```
 
 **Bedrock never grants ownership.** AI extracts claims. Deterministic code verifies them. DynamoDB holds absolute state authority.
@@ -76,10 +91,10 @@ External Side Effect (GitHub API — Idempotent)
 
 | Boundary | Classification | Examples |
 | :--- | :--- | :--- |
-| **UNTRUSTED** | All GitHub-originated content | Issue bodies, comments, READMEs, source files, commit messages, PR descriptions, PR diffs. |
-| **UNTRUSTED** | Bedrock model output | Hallucinated paths, invented symbols, prompt-injected claims. Must be independently verified. |
-| **TRUSTED AUTHORITY** | Deterministic policy engine | Rule-based evaluation of evidence against configurable thresholds. |
-| **TRUSTED AUTHORITY** | DynamoDB conditional state | Lease acquisition, qualification consumption, version-fenced mutations. |
+| **UNTRUSTED** | All GitHub-originated content | Issue bodies, comments, READMEs, source files, commit messages, PR descriptions, PR diffs. Wrapped in `<untrusted_contributor_text>` or `<untrusted_repository_content>`. |
+| **UNTRUSTED** | Bedrock model output | Extracted claims, hypothesized file paths, proposed symbols. Must be verified by deterministic code before state transitions. |
+| **TRUSTED AUTHORITY** | Deterministic Policy Engine | Rule-based evaluation of evidence records against strict qualification thresholds. |
+| **TRUSTED AUTHORITY** | DynamoDB conditional state | Lease acquisition, qualification consumption, delivery admission, version-fenced mutations. |
 
 ---
 
@@ -87,7 +102,7 @@ External Side Effect (GitHub API — Idempotent)
 
 ### Issue Lifecycle
 ```text
-OPEN → CLAIM_WINDOW → QUALIFIED → LEASED → PR_OPEN → INTEGRITY_CHECK → PASS / REVIEW
+OPEN → CLAIM_WINDOW → QUALIFIED → LEASED → PR_OPEN → INTEGRITY_CHECK → PASS / DRIFT / REVIEW
 ```
 
 ### Qualification Lifecycle
@@ -106,30 +121,41 @@ NONE → ACTIVE → COMPLETED / EXPIRED / REVOKED
 
 Every external side effect is protected by an **internal deterministic idempotency record** stored in DynamoDB before execution:
 
-| Side Effect | Idempotency Key Format |
-| :--- | :--- |
-| Webhook event processing | `X-GitHub-Delivery` GUID (stored on admission) |
-| Issue assignment | `assignment/<repoId>/<issueNumber>/<leaseId>` |
-| Evaluation comment | `comment/<verificationId>/<decisionType>` |
-| PR check run | `check/<repoId>/<prNumber>/<headSha>/<checkType>` |
-
-Upon network timeout after a successful GitHub API call, the retry worker reconciles external state before re-executing.
+| Side Effect | Idempotency Key Format | Pre-Flight Reconciliation |
+| :--- | :--- | :--- |
+| Webhook event admission | `EVENT#<deliveryId>` | Conditional write `attribute_not_exists(PK)` drops duplicate deliveries safely. |
+| Issue assignment | `assignment/<repoId>/<issueNumber>/<leaseId>` | Checks whether issue is already assigned to target contributor on GitHub. |
+| Evaluation comment | `comment/<verificationId>/<decisionType>` | Checks whether comment with matching verification marker exists in timeline. |
+| PR check run | `check/<repoId>/<prNumber>/<headSha>/<checkType>` | Checks existing Check Run status on GitHub. |
 
 ---
 
 ## Concurrency Strategy
 
-Lease acquisition is the highest-risk concurrent operation. It **must** use DynamoDB `TransactWriteItems` because:
+Lease acquisition is the highest-risk concurrent operation. It **must** use DynamoDB `TransactWriteItems`:
 
 1. Multiple workers may simultaneously attempt to claim the same issue.
-2. A simple `GetItem → check → PutItem` sequence creates a time-of-check/time-of-use race.
-3. The atomic transaction verifies `(qualification exists AND is VERIFIED AND is unconsumed AND issue has no active unexpired lease)` and writes `(new lease + consumed qualification + updated issue)` in a single all-or-nothing operation.
+2. A simple `GetItem → check → PutItem` sequence creates a fatal time-of-check/time-of-use race.
+3. The atomic transaction verifies `(qualification exists AND is VERIFIED AND is unconsumed AND issue has no active unexpired lease)` and writes `(new lease + consumed qualification + updated issue with incremented version)` in a single all-or-nothing transaction.
 4. Stale-worker fencing uses `ConditionExpression: activeLeaseId = :expected AND version = :expected` on every subsequent mutation.
+5. In the demo concurrency test on fresh Issue #43: 100 parallel worker transactions yield exactly 1 success and 99 `TransactionCanceledException` conflicts.
+
+---
+
+## Cost Discipline
+
+Because Ship It evaluates architecture and cost choices, every service implements concrete cost discipline:
+- **AWS Lambda**: Pure serverless execution with zero idle compute cost.
+- **Amazon SQS Standard**: Buffers burst traffic smoothly instead of overprovisioning compute.
+- **AWS Step Functions Standard**: Coordinates only states actually required; fail-closed halts prevent runaway retries.
+- **Amazon DynamoDB**: On-demand / serverless billing for conditional state transitions; zero provisioned idle capacity.
+- **Amazon S3**: Strict data minimization; stores large evidence only when necessary, with automated lifecycle rules.
+- **Amazon Bedrock**: Invoked only after admission and deduplication succeed; bounded token budgets; never called for duplicate deliveries.
+- **Amazon Amplify Hosting**: Static hosting for the minimal dashboard with near-zero idle cost.
 
 ---
 
 ## MVP Exclusions (Default-Deny)
 
-The following are **not part of the approved MVP architecture**. Any introduction requires answering the 5-point justification test in `.agent-rules/02-aws-architecture.md`:
-
+The following are **not part of the approved MVP architecture**:
 ECS, Fargate, AWS Batch, Aurora/RDS, ElastiCache/Redis, OpenSearch, Amazon Kinesis, MSK (Kafka), EKS, EC2, CodeBuild, arbitrary contributor code execution environments, heavy third-party agent frameworks.

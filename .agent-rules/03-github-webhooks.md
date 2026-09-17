@@ -7,15 +7,28 @@
 ## 1. Webhook Ingestion Boundary
 
 ### Engineering SLO & Protocol Requirements
-- **Engineering SLO**: Aim for sub-second webhook acknowledgement during normal operation.
-- **Correctness Requirement**: The webhook handler must acknowledge quickly and remain well within GitHub's delivery timeout while performing only authentication, minimal normalization, and SQS enqueue work.
+- **Engineering SLO**: Sub-second webhook acknowledgement during normal operation.
+- **Correctness Requirement**: The webhook handler acknowledges quickly and remains well within GitHub's delivery timeout while performing only authentication, minimal normalization, and SQS enqueue work.
 
 ### Mandatory Responsibilities
-1. **Signature Verification**: Validate `X-Hub-Signature-256` HMAC-SHA256 signature using the secret loaded from AWS Secrets Manager. Reject invalid requests immediately with `401 Unauthorized`.
+1. **Signature Verification**: Validate `X-Hub-Signature-256` HMAC-SHA256 signature using the secret loaded from AWS Secrets Manager ARN. Reject invalid signatures immediately with `401 Unauthorized`.
 2. **Delivery Tracking**: Extract `X-GitHub-Delivery` GUID and pass it as the event correlation token.
 3. **Payload Normalization**: Extract essential metadata (`event`, `action`, `repository.id`, `issue.number`, `sender.id`, `installation.id`).
-4. **SQS Ingestion**: Enqueue the normalized event to SQS. Store full payload in S3 if size exceeds SQS limit (256 KB).
+4. **SQS Ingestion**: Enqueue the normalized event to Amazon SQS Standard. Store payload in S3 only if size exceeds the 256 KB SQS message limit (encrypted, repo-scoped, retention-limited).
 5. **Fast Acknowledgment**: Return HTTP 202 Accepted.
+
+### Duplicate Delivery Handling
+- Webhook duplicate deliveries are a normal property of distributed webhooks.
+- The pipeline flow: `Authentic request → ACK (202) → Enqueue → Dispatcher admits via DynamoDB conditional EVENT#<deliveryId> → Safely drop duplicate logical work`.
+- **Do NOT** return authentication errors (`401`) for legitimate duplicate deliveries.
+- SQS Standard provides burst buffering and retry isolation. Authoritative deduplication is enforced by DynamoDB conditional writes during Dispatcher event admission (T05 / E07).
+
+### Webhook Privacy & Safe Structured Telemetry
+- **NEVER log raw or full webhook payloads to CloudWatch.**
+- **Allowed structured metadata**:
+  `githubDeliveryId`, `eventType`, `action`, `installationId`, `repositoryId`, `issueNumber`, `senderId`, `bodyHash`, `correlationId`, `latency`, `result`, `errorClass`.
+- **FORBIDDEN from logs**:
+  Full private issue body, full private source code, GitHub private keys, webhook secrets, AWS credentials, raw repository dumps.
 
 ### Forbidden in Webhook Lambda
 - **NO** synchronous Bedrock invocations.
