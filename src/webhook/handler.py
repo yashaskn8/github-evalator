@@ -134,9 +134,6 @@ def _extract_safe_metadata(parsed_body):
     issue = parsed_body.get("issue")
     if isinstance(issue, dict):
         meta["issueNumber"] = issue.get("number")
-    pull_request = parsed_body.get("pull_request")
-    if isinstance(pull_request, dict) and "issueNumber" not in meta:
-        meta["issueNumber"] = pull_request.get("number")
     sender = parsed_body.get("sender")
     if isinstance(sender, dict):
         meta["senderId"] = sender.get("id")

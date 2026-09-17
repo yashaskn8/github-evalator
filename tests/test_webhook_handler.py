@@ -129,7 +129,7 @@ class TestPullRequestEvent:
         assert logged["repositoryId"] == 54321
         assert logged["senderId"] == 99999
         assert logged["installationId"] == 222
-        assert logged["issueNumber"] == 88
+        assert "issueNumber" not in logged or logged.get("issueNumber") is None
 
 
 # ───────────────────────────────────────────────────────────────────

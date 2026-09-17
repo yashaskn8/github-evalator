@@ -206,7 +206,7 @@
 
 | Field | Value |
 | :--- | :--- |
-| **Goal** | Execute the complete ≤3-minute demonstration scenario (docs/DEMO.md) on deployed AWS infrastructure and verify all 16 evaluations (E01–E16). Complete final submission checklist. |
+| **Goal** | Execute the complete end-to-end demonstration on deployed AWS infrastructure using the implemented workflow and docs/EVALS.md, and verify all 16 evaluations (E01–E16). Complete final submission checklist. |
 | **Dependencies** | T01–T11 (P0 core), T12 (P1 if implemented) |
 | **Rules to Consult** | `01-core-invariants.md`, `docs/EVALS.md`, `12-hackathon-scope.md` |
 | **Output** | Live demo verification; all evals passing; ≤3-minute demo video recorded; final submission checklist completed. |

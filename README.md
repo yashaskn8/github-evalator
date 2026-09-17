@@ -67,7 +67,7 @@ Status: PASS | DRIFT | MAINTAINER REVIEW
 GitHub Webhooks
    │
    ▼
-Amazon API Gateway (HTTP/REST Ingress)
+Amazon API Gateway (HTTP API Ingress)
    │
    ▼
 AWS Lambda (HMAC Verification & Fast SQS Enqueue — Sub-second ACK SLO)
