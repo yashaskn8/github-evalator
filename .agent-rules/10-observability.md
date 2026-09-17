@@ -45,6 +45,7 @@ Emit real runtime operational metrics via CloudWatch EMF:
 
 ---
 
-## 3. Decision Auditability Gate
+## 3. Decision Auditability & Data Privacy Gate
 
-Every system decision (lease grant, proposal rejection, PR drift flag) MUST be fully reconstructible by querying CloudWatch logs using `verificationId` or `githubDeliveryId`. If a decision cannot be audited, the implementation is defective.
+1. **Reconstructibility**: Every system decision (lease grant, proposal rejection, PR drift flag) MUST be fully reconstructible by combining persisted evidence records (in S3/DynamoDB) with correlated CloudWatch operational logs using `verificationId` or `githubDeliveryId`.
+2. **Data Privacy in Logs**: CloudWatch logs must strictly contain correlation IDs, timing metrics, and outcome classifications. **NEVER** log raw private repository source files, full diff dumps, GitHub App private keys, webhook HMAC secrets, or AWS credentials.

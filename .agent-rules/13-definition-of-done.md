@@ -6,22 +6,22 @@
 
 ## 1. The 10 Completion Criteria
 
-1. **Architecture Conformance**: Implementation strictly follows the AWS serverless pipeline (`02-aws-architecture.md`).
+1. **Architecture Conformance**: Implementation strictly follows the approved AWS serverless pipeline (`02-aws-architecture.md`).
 2. **Authority Preservation**: AI only claims; deterministic verifier inspects; DynamoDB governs state (`01-core-invariants.md`).
-3. **No Read-Check-Write**: All state changes use DynamoDB conditional writes or transactions (`06-dynamodb-state-leases.md`).
-4. **Idempotency Verified**: Webhook and external side effects survive 10x duplicate replays (`03-github-webhooks.md`).
-5. **Prompt Injection Hardened**: Untrusted inputs are delimited; verifier confirms ground truth (`04-bedrock-ai-boundary.md`).
+3. **Conditional State Authority**: All authoritative, concurrency-sensitive state transitions (leases, ownership, qualifications) use DynamoDB conditional writes or transactions (`06-dynamodb-state-leases.md`).
+4. **Idempotency Verified**: Webhook and external side effects survive duplicate replays via internal idempotency records (`03-github-webhooks.md`).
+5. **Prompt Injection Hardened**: Untrusted inputs are delimited; verifier independently confirms ground truth (`04-bedrock-ai-boundary.md`).
 6. **Zero Code Execution**: Untrusted code is statically inspected via AST/files, never executed (`05-repository-verifier.md`).
 7. **Adversarial Gate Passed**: Corresponding red-team attack test from `09-testing-red-team.md` passes without exceptions.
-8. **Auditable Provenance**: Complete decision trail reconstructible in CloudWatch logs (`10-observability.md`).
-9. **No Fake / Mocked Logic**: Real APIs and deterministic verification logic used (no hardcoded "demo" shortcuts).
-10. **Zero Decorative Services**: No unapproved AWS services introduced (`12-hackathon-scope.md`).
+8. **Auditable Provenance**: Decisions fully reconstructible from persisted verification records + correlated CloudWatch logs (`10-observability.md`).
+9. **No Fake Product Behavior**: Real APIs, real DynamoDB concurrency, and real verification logic used in the product pipeline. (Test doubles/mocks are permitted in unit tests, but fake demo shortcuts are forbidden).
+10. **Zero Decorative Services**: MVP default-deny policy observed; no unapproved AWS services introduced (`12-hackathon-scope.md`).
 
 ---
 
-## 2. Mandatory Agent Response Template
+## 2. Mandatory Agent Sign-Off Response Template
 
-Future coding agents MUST conclude their response with this structured report:
+Future coding agents MUST conclude formal sign-off reports using this template:
 
 ```markdown
 ### IMPLEMENTED
@@ -29,21 +29,23 @@ Future coding agents MUST conclude their response with this structured report:
 
 ### RULE FILES CONSULTED
 - 01-core-invariants.md
-- <Specific rule file(s) loaded>
+- <Specific component rule file(s) loaded>
 - 09-testing-red-team.md
+- 13-definition-of-done.md
 
 ### INVARIANTS CHECKED
-- [x] Invariant 1: AI cannot grant ownership
-- [x] Invariant 2: Exactly one active lease per issue
-- [x] Invariant 4: Application-enforced lease expiry
-- [x] Invariant 10: Idempotent side effects
+<!-- Only list invariants materially relevant to this change. Do NOT list unrelated invariants. -->
+- [x] I1 — AI cannot grant ownership
+- [x] I2 — Exactly one active lease per issue
+- [x] I5 — At-least-once delivery resilience
+- [x] I10 — Idempotent side effects
 
 ### TESTS RUN
-- `npm test <path>` or `pytest <path>` (unit/integration results)
+- `npm test <path>` or `pytest <path>` (unit/integration test results)
 
 ### RED-TEAM ATTACKS RUN
 - Attack: <Name of attack from 09-testing-red-team.md>
-- Outcome: PASS (with details on verified defense)
+- Outcome: PASS (with evidence of verified defense)
 
 ### FAILURE CASES VERIFIED
 - <Simulated network timeout / retry replay / malformed payload>

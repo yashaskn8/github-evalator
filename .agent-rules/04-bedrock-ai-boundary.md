@@ -1,24 +1,31 @@
 # 04 — Bedrock AI Trust Boundary
 
-> **CORE PRINCIPLE**: AI reasons; deterministic code verifies. Model confidence is NOT evidence.
+> **CORE PRINCIPLE**: AI reasons; deterministic code verifies. Model confidence is NOT evidence. AI output may influence explanation and analysis, but never authority.
 
 ---
 
-## 1. Permitted vs. Forbidden AI Operations
+## 1. Authoritative State vs. Non-Authoritative Output
 
-| Permitted Bedrock Operations | FORBIDDEN Bedrock Operations |
-| :--- | :--- |
-| Parsing issue text & proposal comments | Granting or denying issue assignment |
-| Extracting structured claims & hypotheses | Creating, updating, or revoking DynamoDB leases |
-| Identifying candidate files & symbols to check | Enforcing repository security or authorization policies |
-| Generating human-readable verification summaries | Calling GitHub mutation APIs directly |
-| Comparing proposal intent with PR diff semantics | Deciding whether a PR can be merged |
+### FORBIDDEN: Direct Authoritative Control
+Bedrock MUST NEVER directly control or transition:
+- Issue ownership or GitHub assignment status.
+- DynamoDB lease creation, renewal, or revocation.
+- Qualification records or authorization decisions.
+- System security policies or repository isolation boundaries.
+- GitHub permissions or maintainer overrides.
+
+### PERMITTED: Non-Authoritative Reasoning & Explanations
+Bedrock is approved to produce non-authoritative analytical data:
+- Parsing and structuring proposal text into formal claims.
+- Generating semantic hypotheses and candidate file suggestions.
+- Producing human-readable explanations and revision feedback for contributors.
+- Performing semantic comparison between verified proposal intent and PR diffs.
 
 ---
 
 ## 2. Strict Structured Output Schema
 
-All Bedrock invocations MUST enforce a deterministic JSON output format validated via Pydantic / JSON Schema. Free-form text parsing is strictly prohibited.
+All Bedrock invocations MUST enforce a deterministic JSON output format validated via Pydantic / JSON Schema before downstream consumption. Free-form text parsing is strictly prohibited.
 
 ```json
 {

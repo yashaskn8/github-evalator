@@ -8,12 +8,12 @@
 
 ### MUST BUILD (P0 — Core MVP)
 - Real GitHub App integration with HMAC-SHA256 signature verification.
-- Fast Webhook Lambda ingesting to SQS + DLQ.
+- Fast Webhook Lambda ingesting to SQS + DLQ (sub-second ACK SLO).
 - Step Functions Standard state machine orchestration.
 - Real Bedrock structured claim extraction with schema validation.
 - Real Deterministic Repository Verifier (AST / file / symbol inspection).
 - Real DynamoDB conditional / transactional lease acquisition with stale-worker fencing.
-- Real GitHub API side effects (issue assignment, structured evaluation comment).
+- Real GitHub API side effects protected by internal idempotency records.
 - Real PR drift check comparing unified diff to verified qualification.
 - Real 100-worker concurrency race-condition demonstration test.
 - Real CloudWatch EMF metrics and structured correlation logging.
@@ -25,10 +25,11 @@
 - Proposal revision loop (allowing contributors to submit updated proposals).
 - CloudWatch operational dashboard.
 
-### FORBIDDEN / SCOPE CUTS (P2 — DO NOT BUILD)
+### FORBIDDEN / SCOPE CUTS (P2 — DO NOT BUILD FOR MVP)
 - **NO** arbitrary contributor code execution / execution sandboxes (e.g. Fargate / Docker / Firecracker).
 - **NO** custom ML model training or fine-tuning.
 - **NO** contributor social graph / reputation scoring systems.
 - **NO** Slack, Discord, or IDE extensions.
-- **NO** decorative microservices (Aurora, Redis, OpenSearch, ECS).
+- **NO** decorative microservices (Aurora, Redis, OpenSearch, ECS, Kinesis, MSK).
 - **NO** generic conversational chatbots or open-ended PR reviewers.
+- **NO** fake or mocked behavior in the end-to-end product demo (test doubles are permitted for unit tests only).
