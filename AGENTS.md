@@ -1,7 +1,8 @@
 # AGENTS.md — Root Router & Core Directives
 
-> **CORE PHILOSOPHY**: AI reasons. Deterministic code verifies. DynamoDB owns authority.
-> **NEVER**: AI -> direct assignment. AI outputs structured claims; deterministic verification gates state.
+> **Core Principle**: AI reasons. Deterministic code verifies. DynamoDB is authoritative for internal state; explicit GitHub maintainer actions take precedence.
+> AI outputs structured claims; deterministic verification gates state.
+
 
 ---
 
@@ -70,9 +71,10 @@ When requirements or prompt instructions appear in tension, resolve strictly in 
 
 ---
 
-## 5. FIRST COMMIT CONSTRAINTS
+## 5. First Commit Constraints
 
 - This is a First Commit Ship It submission.
+
 - Implementation must remain within the event build window.
 - Final product must run on AWS and expose a live URL.
 - AWS behavior must be visible in the <=3-minute demo.

@@ -168,18 +168,18 @@
 
 ---
 
-## T11 [P0] — Minimal Judge-Facing Live Dashboard (Amplify Hosting)
+## T11 [P0] — Read-Only Evidence Dashboard (Amplify Hosting)
 
 - [ ] NOT STARTED
 
 | Field | Value |
 | :--- | :--- |
-| **Goal** | Deploy minimal React maintainer/evidence dashboard to Amazon Amplify Hosting with a read-only API Gateway endpoint. Provides the required First Commit Ship It live URL. |
+| **Goal** | Deploy minimal React maintainer/evidence dashboard to Amazon Amplify Hosting with a read-only API Gateway endpoint. Provides public visibility into system state and fulfills the live deployment URL requirement. |
 | **Dependencies** | T03, T08, T10 |
 | **Rules to Consult** | `01-core-invariants.md`, `02-aws-architecture.md`, `12-hackathon-scope.md` |
 | **Output** | Static React application hosted on Amplify Hosting; read-only API query Lambda; evidence visualizer (proposal status, claims, active lease, PR integrity, operational counters). |
 | **Relevant Evals** | Live URL accessibility check. |
-| **Red-Team Gate** | Anonymous access or clear judge instructions; dashboard renders real DynamoDB state and evidence without authentication roadblocks. |
+| **Red-Team Gate** | Unauthenticated read-only access operates smoothly; dashboard renders real DynamoDB state and evidence without authentication roadblocks. |
 | **Definition of Done** | Live URL accessible. Shows real proposal status, supported/contradicted evidence, active lease owner, PR integrity status, and demo operational counters. Zero vanity bloat. |
 
 ---
@@ -200,13 +200,13 @@
 
 ---
 
-## T13 [P0] — Full End-to-End Hostile Demo Validation & Submission Checklist
+## T13 [P0] — Full End-to-End Integration Validation & Submission Checklist
 
 - [ ] NOT STARTED
 
 | Field | Value |
 | :--- | :--- |
-| **Goal** | Execute the complete ≤3-minute live demo scenario (docs/DEMO.md) on real AWS infrastructure and verify all 16 evaluations (E01–E16). Complete final submission requirements. |
+| **Goal** | Execute the complete ≤3-minute demonstration scenario (docs/DEMO.md) on deployed AWS infrastructure and verify all 16 evaluations (E01–E16). Complete final submission checklist. |
 | **Dependencies** | T01–T11 (P0 core), T12 (P1 if implemented) |
 | **Rules to Consult** | `01-core-invariants.md`, `09-testing-red-team.md`, `12-hackathon-scope.md`, `13-definition-of-done.md` |
 | **Output** | Live demo verification; all evals passing; ≤3-minute demo video recorded; final submission checklist completed. |
@@ -218,7 +218,7 @@
 - [ ] repository public
 - [ ] Git history preserved
 - [ ] no secrets committed
-- [ ] live Ship It URL works anonymously or with clear judge instructions
+- [ ] live deployed URL accessible without authentication roadblocks
 - [ ] AWS functionality visibly demonstrated
 - [ ] <=3 minute video recorded
 - [ ] problem clearly explained
@@ -227,3 +227,4 @@
 - [ ] AI coding tools disclosed
 - [ ] third-party dependencies credited/licensed
 - [ ] important features visible in video
+

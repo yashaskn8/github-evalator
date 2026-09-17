@@ -30,10 +30,10 @@ AWS Step Functions Standard (Auditable Orchestration)
    ├── 5. DynamoDB Atomic Lease Acquisition (TransactWriteItems)
    └── 6. GitHub Side Effect (Idempotent Assignment/Comment/Check)
 
-Maintainer / Judge
+Maintainer / Viewer
    │
    ▼
-Amazon Amplify Hosting (Ship It Live URL)
+Amazon Amplify Hosting (Live Dashboard)
    │
    ▼
 Minimal React Maintainer / Evidence Dashboard
@@ -48,21 +48,21 @@ Read-Only Evidence / Status API (API Gateway + Lambda)
 
 ## Service Justifications
 
-| Service | Responsibility | Failure Mode / Justification |
+| Service | Responsibility | Operational Justification |
 | :--- | :--- | :--- |
-| **API Gateway** | HTTPS ingress for GitHub webhooks and dashboard API. | TLS termination, rate limiting, and edge request filtering. |
-| **Webhook Lambda** | Fast HMAC-SHA256 signature validation and SQS enqueue. | Isolates fast sub-second acknowledgement from downstream analysis; prevents GitHub delivery timeouts. |
-| **Amazon SQS Standard + DLQ** | At-least-once delivery buffer and backpressure control. | Absorbs webhook bursts; isolates poison messages to DLQ; decouples ingestion from workflow execution. *(Does NOT provide authoritative deduplication).* |
+| **API Gateway** | HTTPS ingress for GitHub webhooks and dashboard API. | Provides TLS termination, edge rate limiting, and request routing. |
+| **Webhook Lambda** | Fast HMAC-SHA256 signature validation and SQS enqueue. | Isolates fast sub-second acknowledgement from downstream analysis; prevents webhook delivery timeouts. |
+| **Amazon SQS Standard + DLQ** | At-least-once delivery buffer and backpressure control. | Absorbs webhook bursts; isolates poison messages to DLQ; decouples ingestion from workflow execution. *(Does not provide authoritative deduplication).* |
 | **Dispatcher Lambda** | Atomic delivery admission via DynamoDB `EVENT#<deliveryId>`. | Drops duplicate webhook deliveries safely without auth errors or duplicated Step Functions workflows. |
 | **Step Functions Standard** | Staged, auditable orchestration of verification and PR integrity. | Visual execution traces, built-in retry/catch policies, and state isolation; eliminates monolithic Lambda anti-patterns. |
 | **Amazon Bedrock** | Structured semantic claim extraction from natural language. | Invoked via `bedrock-runtime` with JSON Schema (e.g. Claude Sonnet 4.6); extracts typed claims without holding state authority. |
-| **Deterministic Verifier** | Independent static AST and Git tree ground-truth analysis. | Confirms or contradicts Bedrock claims against actual repository code; eliminates model hallucinations. |
-| **Policy Engine** | Deterministic qualification gating. | Evaluates verifier evidence against strict rules (`VERIFIED` only if concrete claims supported and target bound). |
+| **Deterministic Verifier** | Independent static AST and Git tree analysis. | Confirms or contradicts Bedrock claims against actual repository code; eliminates reliance on unverified model output. |
+| **Policy Engine** | Deterministic qualification gating. | Evaluates verifier evidence against explicit rules (`VERIFIED` only if concrete claims supported and target bound). |
 | **Amazon DynamoDB** | Single-table authoritative state: events, leases, issues, idempotency. | Conditional writes and `TransactWriteItems` prevent read-check-write races and enforce single-lease ownership. |
 | **Amazon S3** | Data-minimized evidence storage. | Stores only verification evidence bundles, large diffs, and oversized payloads (>256 KB); encrypted and retention-limited. |
-| **AWS Secrets Manager** | GitHub App private key ARN and webhook secret ARN. | Eliminates plaintext secrets; supports zero-downtime rotation. |
+| **AWS Secrets Manager** | GitHub App private key ARN and webhook secret ARN. | Eliminates plaintext secrets in configuration; supports zero-downtime rotation. |
 | **Amazon CloudWatch** | Structured JSON logs and EMF operational metrics. | Full decision auditability and real-time operational telemetry. |
-| **Amazon Amplify Hosting** | Static hosting for the minimal judge-facing React dashboard. | **Specifically justified by the First Commit Ship It live URL requirement.** Delivers an accessible URL with near-zero idle cost. |
+| **Amazon Amplify Hosting** | Static hosting for the read-only evidence dashboard. | Serves the web-accessible dashboard URL and scales with demand. |
 
 ---
 
@@ -71,7 +71,7 @@ Read-Only Evidence / Status API (API Gateway + Lambda)
 ```text
 AI (Bedrock via bedrock-runtime)
   ↓ structured semantic claims (JSON Schema)
-Repository Ground-Truth (Python AST & Git Tree)
+Repository Ground Truth (Python AST & Git Tree)
   ↓ independent inspection
 Deterministic Verifier
   ↓ SUPPORTED / CONTRADICTED / UNKNOWN evidence records
@@ -83,7 +83,7 @@ External Side Effect (GitHub API — Idempotent)
   ↓ assignment + evidence comment
 ```
 
-**Bedrock never grants ownership.** AI extracts claims. Deterministic code verifies them. DynamoDB holds absolute state authority.
+Bedrock never grants ownership. AI extracts claims. Deterministic code verifies them. DynamoDB is authoritative for internal lease and idempotency state, while GitHub maintainer actions take precedence and reconcile upon detection.
 
 ---
 
@@ -119,7 +119,7 @@ NONE → ACTIVE → COMPLETED / EXPIRED / REVOKED
 
 ## Idempotency Strategy
 
-Every external side effect is protected by an **internal deterministic idempotency record** stored in DynamoDB before execution:
+Every external side effect is protected by an internal deterministic idempotency record stored in DynamoDB before execution:
 
 | Side Effect | Idempotency Key Format | Pre-Flight Reconciliation |
 | :--- | :--- | :--- |
@@ -132,30 +132,30 @@ Every external side effect is protected by an **internal deterministic idempoten
 
 ## Concurrency Strategy
 
-Lease acquisition is the highest-risk concurrent operation. It **must** use DynamoDB `TransactWriteItems`:
+Lease acquisition is the highest-risk concurrent operation. It uses DynamoDB `TransactWriteItems`:
 
 1. Multiple workers may simultaneously attempt to claim the same issue.
-2. A simple `GetItem → check → PutItem` sequence creates a fatal time-of-check/time-of-use race.
+2. A simple `GetItem → check → PutItem` sequence creates a time-of-check/time-of-use race condition.
 3. The atomic transaction verifies `(qualification exists AND is VERIFIED AND is unconsumed AND issue has no active unexpired lease)` and writes `(new lease + consumed qualification + updated issue with incremented version)` in a single all-or-nothing transaction.
 4. Stale-worker fencing uses `ConditionExpression: activeLeaseId = :expected AND version = :expected` on every subsequent mutation.
-5. In the demo concurrency test on fresh Issue #43: 100 parallel worker transactions yield exactly 1 success and 99 `TransactionCanceledException` conflicts.
+5. In the concurrency test on fresh Issue #43: 100 parallel worker transactions yield exactly 1 success and 99 `TransactionCanceledException` conflicts.
 
 ---
 
 ## Cost Discipline
 
-Because Ship It evaluates architecture and cost choices, every service implements concrete cost discipline:
-- **AWS Lambda**: Pure serverless execution with zero idle compute cost.
-- **Amazon SQS Standard**: Buffers burst traffic smoothly instead of overprovisioning compute.
+Each architecture component implements concrete engineering cost controls:
+- **AWS Lambda**: Request-driven serverless compute with no provisioned server fleet.
+- **Amazon SQS Standard**: Buffers burst traffic smoothly instead of overprovisioning compute resources.
 - **AWS Step Functions Standard**: Coordinates only states actually required; fail-closed halts prevent runaway retries.
-- **Amazon DynamoDB**: On-demand / serverless billing for conditional state transitions; zero provisioned idle capacity.
-- **Amazon S3**: Strict data minimization; stores large evidence only when necessary, with automated lifecycle rules.
+- **Amazon DynamoDB**: On-demand capacity billing for conditional state transitions with no idle provisioned capacity.
+- **Amazon S3**: Data minimization; stores large evidence only when necessary, with automated lifecycle rules.
 - **Amazon Bedrock**: Invoked only after admission and deduplication succeed; bounded token budgets; never called for duplicate deliveries.
-- **Amazon Amplify Hosting**: Static hosting for the minimal dashboard with near-zero idle cost.
+- **Amazon Amplify Hosting**: Static dashboard hosting that scales with demand.
 
 ---
 
-## MVP Exclusions (Default-Deny)
+## Scope Exclusions (Default-Deny)
 
-The following are **not part of the approved MVP architecture**:
+The following components are not part of the MVP architecture:
 ECS, Fargate, AWS Batch, Aurora/RDS, ElastiCache/Redis, OpenSearch, Amazon Kinesis, MSK (Kafka), EKS, EC2, CodeBuild, arbitrary contributor code execution environments, heavy third-party agent frameworks.

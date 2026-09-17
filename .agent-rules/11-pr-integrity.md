@@ -1,13 +1,13 @@
 # 11 — PR Intent & Drift Integrity
 
-> **CORE QUESTION**: Did the contributor implement approximately the approach and file scope that earned them ownership of this issue?
-> **KILLER FEATURE**: The PR Integrity system tracks the pull request across commits to prove implementation consistency over time.
+> **Core Question**: Did the contributor implement approximately the approach and file scope that earned them ownership of this issue?
+> **Key Capability**: The PR Integrity system tracks pull requests across commits to evaluate implementation consistency over time.
 
 ---
 
 ## 1. Intent vs. Diff Comparison
 
-The PR Integrity system is NOT a generic code linter or AI style checker. It evaluates whether the pull request honors the **verified intent** captured during qualification.
+The PR Integrity system is not a generic code linter or AI style checker. It evaluates whether the pull request honors the **verified intent** captured during qualification.
 
 ```text
 Stored Qualification / VerificationRun (Intent)
@@ -17,7 +17,7 @@ Stored Qualification / VerificationRun (Intent)
 
 ---
 
-## 2. Multi-Commit Same-PR Drift Verification (Fix M)
+## 2. Multi-Commit Same-PR Drift Verification
 
 To prove that implementation consistency is maintained throughout the PR lifecycle, the integrity workflow executes on every commit push (`pull_request.synchronize`):
 
@@ -34,7 +34,7 @@ Charlie's PR #88
          Action: Maintainer review flag raised on Live Dashboard
 ```
 
-This directly proves: the implementation remained consistent with the proposal that earned ownership, and unauthorized scope creep across commits is instantly caught.
+This verifies that the implementation remains consistent with the proposal that earned ownership, detecting unexpected file modifications across commits.
 
 ---
 
@@ -61,7 +61,7 @@ This directly proves: the implementation remained consistent with the proposal t
 
 ---
 
-## 5. Bounded Claims
+## 5. Grounded Assertions
 
 Never output claims such as `"AI verified the code is bug-free"` or `"Code is mathematically proven correct"`.
 Always output grounded language: `"PR scope matches verified qualification intent (2 of 2 promised files modified, tests included)."`

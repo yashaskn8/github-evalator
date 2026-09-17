@@ -1,6 +1,6 @@
 # 06 — DynamoDB Authoritative State & Leases
 
-> **CORE LAW**: DynamoDB holds absolute authority over issue assignments and leases. Read-check-write patterns on authoritative state are strictly forbidden.
+> **Core Principle**: DynamoDB is authoritative for the system's internal lease, qualification, fencing, and idempotency state. GitHub remains the external system of record. Read-check-write patterns on authoritative state are strictly prohibited.
 
 ---
 
@@ -17,7 +17,7 @@
 
 ---
 
-## 2. Atomic Event Admission & Webhook Deduplication (Fix A)
+## 2. Atomic Event Admission & Webhook Deduplication
 
 During Dispatcher execution (T05), webhook duplicate detection is performed atomically:
 ```text
@@ -40,16 +40,16 @@ All authoritative, concurrency-sensitive state transitions (lease acquisition, r
 5. **Action on Lease**: Put new `Lease` record with unique generation ID.
 
 ```text
-FORBIDDEN ANTI-PATTERN:
+PROHIBITED ANTI-PATTERN:
   issue = dynamodb.get_item(...)
   if not issue.get('assigneeId'):
       dynamodb.put_item(...) # RACE CONDITION: Concurrently executing worker can assign in between
 ```
 
-### Concurrency Race Verification (Fix K & Fix O)
+### Concurrency Verification
 - Verified on fresh Issue #43: 100 parallel worker transactions targeting the issue simultaneously.
 - **T08 Proof**: 100 transactions, 1 success, 99 conditional failures (`TransactionCanceledException`), exactly 1 active lease.
-- **T12/T13 Observability**: Proves CloudWatch `LeaseConflicts` metric equals 99.
+- **T12/T13 Observability**: CloudWatch `LeaseConflicts` metric confirms 99 conflict failures.
 
 ---
 

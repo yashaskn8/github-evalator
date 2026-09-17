@@ -1,24 +1,24 @@
 # 05 — Deterministic Repository Verifier & Qualification Policy
 
-> **DIRECTIVE**: The verifier is the authoritative ground-truth gate. It independently inspects repository structure and code symbols without executing untrusted contributor code.
-> **BOUNDARY**: The Verifier produces only evidence (`SUPPORTED`, `CONTRADICTED`, `UNKNOWN`). The Policy Engine produces decisions (`VERIFIED`, `NEEDS_REVISION`, `ESCALATED`).
+> **Directive**: The verifier is the authoritative ground-truth gate. It independently inspects repository structure and code symbols without executing untrusted contributor code.
+> **Boundary**: The Verifier produces evidence (`SUPPORTED`, `CONTRADICTED`, `UNKNOWN`). The Policy Engine produces decisions (`VERIFIED`, `NEEDS_REVISION`, `ESCALATED`).
 
 ---
 
-## 1. Verifier Scope & MVP Language Support (Fix E)
+## 1. Verifier Scope & Language Support
 
-For the 4-day hackathon window, the MVP analyzer is strictly locked to:
+For the MVP, the repository analyzer supports:
 1. **Git Tree & Path Existence**: Language-independent inspection of repository trees at pinned commit SHA.
 2. **Python Symbol Inspection**: Python built-in AST (`ast` module) and static parsing to locate functions, classes, and methods.
 3. **Python Test Discovery**: Demo repository conventions (`tests/test_*.py`, test directories).
-4. **Extensible Analyzer Interface**: Implement an internal analyzer interface (`RepoAnalyzer`) so additional languages (TypeScript, Go, etc.) can be added post-hackathon without altering pipeline architecture.
-5. **No Code Execution**: Static analysis only. Contributor code is NEVER executed (`npm test`, `pytest`, etc.).
+4. **Extensible Analyzer Interface**: Implement an internal analyzer interface (`RepoAnalyzer`) so additional languages (TypeScript, Go, etc.) can be added post-MVP without altering pipeline architecture.
+5. **No Code Execution**: Static analysis only. Contributor code is not executed during verification (`npm test`, `pytest`, etc.).
 
 ---
 
-## 2. Structured Evidence Output (Fix N)
+## 2. Structured Evidence Output
 
-The verifier evaluates Bedrock-extracted claims against repository AST and Git tree, outputting granular evidence records. Boolean-only responses and fake line numbers are prohibited.
+The verifier evaluates Bedrock-extracted claims against repository AST and Git tree, outputting granular evidence records. Boolean-only responses and synthetic line numbers are prohibited.
 
 ```json
 {
@@ -63,7 +63,7 @@ The verifier evaluates Bedrock-extracted claims against repository AST and Git t
 
 ---
 
-## 3. Qualification Policy Engine (Fix D)
+## 3. Qualification Policy Engine
 
 The Policy Engine is a separate deterministic module/state following the Verifier:
 
@@ -72,13 +72,13 @@ The Policy Engine is a separate deterministic module/state following the Verifie
 - `NEEDS_REVISION`
 - `ESCALATED`
 
-### Conservative Policy Rules
-1. **`VERIFIED` ONLY when ALL of the following hold**:
+### Policy Rules
+1. **`VERIFIED` only when all of the following hold**:
    - Proposal contains a concrete implementation target.
    - Required named file/path claims are `SUPPORTED`.
    - Required named symbol claims are `SUPPORTED` when supplied.
-   - NO required implementation claim is `CONTRADICTED`.
-   - Enough repository evidence exists to bind implementation intent.
+   - No required implementation claim is `CONTRADICTED`.
+   - Sufficient repository evidence exists to bind implementation intent.
 2. **`NEEDS_REVISION` when**:
    - Proposal is vague or lacks repository-grounded detail.
    - Any required implementation claim is `CONTRADICTED`.
@@ -89,4 +89,4 @@ The Policy Engine is a separate deterministic module/state following the Verifie
    - Model or infrastructure failure prevents a safe decision.
    - Maintainer policy demands manual review.
 
-**AI confidence can NEVER produce `VERIFIED` by itself.** Only deterministic evidence satisfying the policy yields `VERIFIED`.
+**AI confidence can never produce `VERIFIED` by itself.** Only deterministic evidence satisfying the policy yields `VERIFIED`.

@@ -1,108 +1,108 @@
 # 3-Minute Demo Script — GitHub Evalator
 
-> **DO NOT FAKE**: GitHub events, Bedrock responses, DynamoDB lease races, GitHub assignments, PR diffs, or CloudWatch values. Every demo action must be real.
-> **JUDGING FOCUS**: Product first. AWS proof second. Maximize visible behavior over static console views.
+> **Operational Standard**: Zero synthetic or hardcoded metrics. Every demonstrated state transition, verification result, DynamoDB conditional transaction, and GitHub API call runs against actual infrastructure.
+> **Demo Objective**: Product workflow first, AWS architecture second. Focus on visible repository and dashboard behavior.
 
 ---
 
 ## Demo Timeline (0:00 – 3:00)
 
 ```text
-0:00–0:15  The PR-Flood Problem (Why open-source maintainers drown in PRs)
-0:15–0:55  Alice / Bob / Charlie Verification (Live evidence on Amplify Dashboard)
-0:55–1:25  Charlie Receives Atomic Issue Ownership (DynamoDB lease + GitHub assignment)
-1:25–1:45  Fresh Issue Concurrency Attack (100 parallel transactions → exactly 1 lease)
-1:45–2:20  Same-PR Integrity Loop (Commit A PASS → Commit B DRIFT on billing/stripe.ts)
-2:20–2:40  AWS Serverless Architecture (Step Functions visual trace & service roles)
-2:40–2:55  Real Operational Evidence (CloudWatch EMF metrics & Live Dashboard counters)
-2:55–3:00  Impact Statement (Ship It conclusion)
+0:00–0:15  Problem Context (Overlapping claims and duplicate pull requests)
+0:15–0:55  Proposal Verification (Live evidence on the Amplify Dashboard)
+0:55–1:25  Atomic Issue Lease Grant (DynamoDB transaction + GitHub assignment)
+1:25–1:45  Fresh Issue Concurrency Test (100 parallel transactions → exactly 1 lease)
+1:45–2:20  Proposal-to-PR Integrity (Commit A PASS → Commit B DRIFT on billing/stripe.ts)
+2:20–2:40  AWS Serverless Architecture (Step Functions execution trace & service roles)
+2:40–2:55  Operational Telemetry (CloudWatch EMF metrics & Live Dashboard counters)
+2:55–3:00  Impact & Summary
 ```
 
 ---
 
-### 0:00–0:15 — The PR-Flood Problem
+### 0:00–0:15 — Problem Context
 
-**Visual**: High-traffic open-source issue on GitHub flooded with low-effort comments: *"assign me please"*, *"can I take this?"*, followed by multiple competing, broken PRs.
+**Visual**: High-traffic open-source issue on GitHub with multiple competing comments ("assign me please", "can I take this?"), followed by competing, duplicate pull requests.
 
 **Narration**:
-> *"Popular open-source repositories suffer from the PR flood. An issue is opened and immediately inundated with generic 'assign me' spam. Unvetted contributors work in silos, producing conflicting, duplicate PRs. Maintainers spend hours reviewing off-target code.*
+> *"High-traffic open-source issues often attract overlapping contributor claims and duplicate implementation work. Maintainers spend significant time reviewing off-target or conflicting pull requests.*
 > 
-> *GitHub Evalator attacks the problem before it happens — qualifying implementation intent against actual repository code before granting exclusive issue ownership."*
+> *GitHub Evalator evaluates repository-grounded implementation proposals before granting an exclusive issue lease, ensuring work is coordinated before pull requests are opened."*
 
 ---
 
-### 0:15–0:55 — Alice / Bob / Charlie Verification (Live on Amplify Dashboard)
+### 0:15–0:55 — Proposal Verification (Live on Amplify Dashboard)
 
-**Visual**: Split screen with GitHub Issue #42 (*"Add exponential backoff to retry logic"*) and the **Live Amplify Maintainer Dashboard**.
+**Visual**: Split screen with GitHub Issue #42 (*"Add exponential backoff to retry logic"*) and the **Live Maintainer Dashboard**.
 
-Three contributor proposals are posted:
+Three contributor proposals are evaluated:
 
 | Contributor | Submitted Proposal | Verification Outcome |
 | :--- | :--- | :--- |
-| **Alice** | `"assign me please"` | ❌ **REJECTED** — Zero technical claims. No files or symbols proposed. |
-| **Bob** | `"I'll fix this in src/client.py"` | ⚠️ **NEEDS_REVISION** — File exists, but proposal lacks grounded implementation detail and repository evidence does not establish it as the relevant retry path. |
-| **Charlie** | `"I'll modify retry_request in src/retry.py to add exponential backoff with jitter, and add a test in tests/test_retry.py"` | ✅ **VERIFIED** — Files exist; `retry_request` confirmed in `src/retry.py` at pinned commit SHA; test directory confirmed. |
+| **Alice** | `"assign me please"` | REJECTED — Zero technical claims. No files or symbols proposed. |
+| **Bob** | `"I'll fix this in src/client.py"` | NEEDS_REVISION — File exists, but proposal lacks grounded implementation detail and repository evidence does not establish it as the relevant retry path. |
+| **Charlie** | `"I'll modify retry_request in src/retry.py to add exponential backoff with jitter, and add a test in tests/test_retry.py"` | VERIFIED — Files exist; `retry_request` confirmed in `src/retry.py` at pinned commit SHA; test directory confirmed. |
 
-**Live Dashboard shows dynamically retrieved evidence**:
+**Live Dashboard displays dynamically retrieved evidence**:
 - Claim: `FILE_EXISTS: src/retry.py` → `SUPPORTED`
 - Claim: `SYMBOL_EXISTS: retry_request` → `SUPPORTED (commit=<actual sha>)`
 - Policy Evaluation: `VERIFIED`
 
 ---
 
-### 0:55–1:25 — Charlie Receives Atomic Issue Ownership
+### 0:55–1:25 — Atomic Issue Lease Grant
 
 **Visual**: DynamoDB item view and GitHub Issue #42 timeline.
 
-**What happens live**:
+**Execution steps**:
 1. Charlie's `VERIFIED` qualification is atomically consumed via DynamoDB `TransactWriteItems`.
 2. Issue #42 updates with `activeLeaseId: lease_charlie_42` and incremented `version: 2`.
 3. GitHub API assigns Charlie to Issue #42.
 4. An automated evidence comment is posted on the issue showing the exact verification provenance.
 
 **Narration**:
-> *"Charlie didn't just ask to be assigned — he proved repository-grounded intent. DynamoDB atomically grants him exclusive ownership. No other contributor can be assigned while his lease is active."*
+> *"Charlie demonstrated repository-grounded intent. DynamoDB atomically grants him exclusive ownership. No other automated lease can be issued for this issue while his lease remains active."*
 
 ---
 
-### 1:25–1:45 — Fresh Issue Concurrency Attack (Issue #43)
+### 1:25–1:45 — Fresh Issue Concurrency Test (Issue #43)
 
-**Visual**: Terminal launches concurrency test harness against a fresh issue (**Issue #43**), followed by DynamoDB table inspection.
+**Visual**: Terminal executing the concurrency test harness against fresh **Issue #43**, followed by DynamoDB table inspection.
 
-**What happens live**:
+**Execution steps**:
 - 100 pre-qualified concurrency-test claimants simultaneously attempt to acquire the lease on fresh Issue #43 using DynamoDB conditional transactions (`TransactWriteItems`).
 - **Results**:
-  - ✅ **Exactly 1 transaction succeeds** → 1 active lease created.
-  - ❌ **99 transactions fail** with `TransactionCanceledException`.
+  - Exactly 1 transaction succeeds → 1 active lease created.
+  - 99 transactions fail with `TransactionCanceledException`.
   - Zero double-assignments.
 
-*(Note for judges: The workers are generated by a load-test harness, but the DynamoDB transactions and resulting state are 100% real).*
+*Note: The load-test workers are generated by the test harness; all DynamoDB transactions and resulting state are executed against the deployed AWS environment.*
 
 ---
 
-### 1:45–2:20 — Same-PR Integrity Loop (The Killer Feature)
+### 1:45–2:20 — Proposal-to-PR Integrity
 
-**Visual**: Charlie's Pull Request #88 on GitHub linked to Issue #42, and the Live Amplify Dashboard.
+**Visual**: Charlie's Pull Request #88 on GitHub linked to Issue #42, and the Live Maintainer Dashboard.
 
 **Commit A (Head SHA A)**:
 - Charlie opens PR #88 with changes in `src/retry.py` and `tests/test_retry.py`.
 - Step Functions PR Integrity workflow evaluates diff against verified qualification intent.
-- **Outcome**: ✅ **PASS** — Changes strictly match the approved proposal scope. GitHub Check Run passes.
+- **Outcome**: PASS — Changes match the approved proposal scope. GitHub Check Run passes.
 
 **Commit B (Head SHA B)**:
 - Charlie pushes a second commit to the *same PR*, adding changes in `billing/stripe.ts` (unrelated payment file).
 - The integrity workflow re-runs on Head SHA B:
-- **Outcome**: ⚠️ **DRIFT** — Modified file `billing/stripe.ts` was not part of the qualified intent.
-- A warning comment is posted on the PR and the maintainer review flag is raised on the live dashboard.
+- **Outcome**: DRIFT — Modified file `billing/stripe.ts` was not part of the qualified intent.
+- A warning comment is posted on the PR and the maintainer review flag is raised on the dashboard.
 
 **Narration**:
-> *"This closes the loop. Charlie earned the issue based on retry logic. When his PR drifts into payment code, GitHub Evalator instantly catches the drift across commits and alerts the maintainer."*
+> *"This closes the loop between proposal and implementation. Charlie earned the lease based on retry logic. When the pull request adds changes in unrelated payment code, GitHub Evalator detects the drift across commits and alerts the maintainer."*
 
 ---
 
 ### 2:20–2:40 — AWS Serverless Architecture
 
-**Visual**: Step Functions execution graph showing the real execution history with green completed states:
+**Visual**: Step Functions execution graph showing real execution history with completed states:
 ```text
 LOAD_CONTEXT → PARSE_PROPOSAL (Bedrock via bedrock-runtime)
 → RETRIEVE_EVIDENCE → VERIFY_CLAIMS (Python AST Verifier)
@@ -111,23 +111,23 @@ LOAD_CONTEXT → PARSE_PROPOSAL (Bedrock via bedrock-runtime)
 ```
 
 **Narration**:
-> *"Under the hood: Amazon API Gateway receives webhooks, Webhook Lambda acknowledges within 500 milliseconds, SQS Standard buffers bursts, and Step Functions coordinates Bedrock claim extraction, AST verification, and atomic DynamoDB state transitions. Hosted on AWS Amplify with zero continuously running servers."*
+> *"Under the hood: Amazon API Gateway receives webhooks, Webhook Lambda acknowledges within 500 milliseconds, SQS Standard buffers bursts, and Step Functions coordinates Bedrock claim extraction, AST verification, and atomic DynamoDB state transitions. Hosted on AWS Amplify with serverless scaling and no provisioned server fleet."*
 
 ---
 
-### 2:40–2:55 — Real Operational Evidence
+### 2:40–2:55 — Operational Telemetry
 
-**Visual**: Live Amplify Dashboard operational counters and CloudWatch metrics dashboard:
+**Visual**: Live Maintainer Dashboard operational counters and CloudWatch metrics dashboard:
 - `Proposals Verified`: Real count
 - `Proposals Rejected / Needs Revision`: Real count
 - `Lease Conflicts (Concurrency Race)`: 99
 - `Duplicate Assignments`: 0
 - `PR Drifts Detected`: 1
-- `Webhook P95 Latency`: Real sub-second value
+- `Webhook P95 Latency`: Sub-second observed value
 
 ---
 
-### 2:55–3:00 — Impact Statement
+### 2:55–3:00 — Impact & Summary
 
 **Narration**:
-> *"GitHub Evalator replaces chaotic 'assign me' spam with deterministic, evidence-backed issue ownership. AI reasons, code verifies, and DynamoDB holds authority. Built on AWS serverless for the First Commit Ship It track."*
+> *"GitHub Evalator replaces uncoordinated issue claims with deterministic, evidence-backed issue ownership. Structured AI extraction, AST verification, and conditional state authority work together on serverless AWS."*

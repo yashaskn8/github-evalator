@@ -1,30 +1,30 @@
 # Product Requirements Document — GitHub Evalator
 
-> **Prevent the PR flood by qualifying implementation intent before granting issue ownership.**
+> **Qualify implementation intent against repository reality before granting issue ownership.**
 
 ---
 
 ## Problem Statement
 
-Popular open-source repositories face a systemic operational problem: when a valuable issue is opened, it attracts a flood of low-context "assign me" comments and competing implementations. Maintainers lack a scalable mechanism to evaluate whether a contributor actually understands the codebase before granting ownership. The result is duplicate PRs, wasted contributor effort, and unsustainable review overhead.
+High-traffic open-source repositories frequently encounter an operational bottleneck when valuable issues are published: issues attract numerous generic "assign me" comments without implementation details. Maintainers have limited time to evaluate whether a contributor understands the codebase before granting ownership, which can lead to overlapping, competing pull requests, wasted effort, and high review overhead.
 
-**GitHub Evalator solves this by requiring contributors to demonstrate repository-grounded implementation intent before receiving exclusive issue ownership.**
+**GitHub Evalator evaluates proposed implementation intent against actual repository code before granting an exclusive issue lease.**
 
 ---
 
-## Users
+## Target Personas
 
-| Role | Pain Points |
+| Role | Operational Context |
 | :--- | :--- |
-| **Open-Source Maintainer** (Primary) | Flooded with "assign me" comments; duplicate competing PRs; low-context contributions; unclear ownership; unsustainable review load. |
-| **Contributor** (Secondary) | Working on issues someone else is also implementing; unclear ownership signals; good proposals drowned out by low-effort comments; wasted implementation time. |
-| **Hackathon Judge** | Needs to immediately see real AWS-powered behavior and access a live, working deployment URL. |
+| **Open-Source Maintainer** (Primary) | Manages issue triage and assignment; seeks to reduce unvetted "assign me" claims and prevent duplicate or conflicting pull requests. |
+| **Contributor** (Secondary) | Submits implementation plans for issues; benefits from clear ownership signals and early validation of proposed approaches. |
+| **Project Observer / Reviewer** | Seeks transparency into system decisions, verification evidence, and operational telemetry via an accessible web dashboard. |
 
 ---
 
 ## Product Goal
 
-Prevent unnecessary PR floods by validating proposed implementation intent against actual repository structure before granting exclusive, time-bounded issue ownership, with full end-to-end evidence visualized on a live dashboard.
+Coordinate issue ownership by validating implementation proposals against actual repository structure before granting exclusive, time-bounded leases, with end-to-end evidence visualized on a read-only dashboard.
 
 ---
 
@@ -33,24 +33,24 @@ Prevent unnecessary PR floods by validating proposed implementation intent again
 ```text
 1. Issue opened on GitHub
 2. Contributors submit implementation proposals (issue comments)
-3. Bedrock extracts structured, falsifiable claims from each proposal (via JSON Schema)
+3. Amazon Bedrock extracts structured claims from each proposal (via JSON Schema)
 4. Deterministic Verifier inspects repository AST & Git tree for evidence (SUPPORTED / CONTRADICTED / UNKNOWN)
 5. Policy Engine evaluates verification results against thresholds (VERIFIED / NEEDS_REVISION / ESCALATED)
-6. DynamoDB atomic conditional transaction grants exclusive lease (max 1 per issue via TransactWriteItems)
+6. DynamoDB atomic conditional transaction grants exclusive lease (max 1 active lease per issue via TransactWriteItems)
 7. GitHub API assigns the issue to the qualified contributor and posts evidence breakdown (idempotent)
 8. Contributor opens a Pull Request
 9. PR Integrity Workflow compares unified diff against verified proposal intent (head SHA A PASS → head SHA B DRIFT)
-10. Live Evidence Dashboard on Amazon Amplify visualizes the entire lifecycle in real time
+10. Read-only Evidence Dashboard on Amazon Amplify visualizes the evaluation lifecycle in real time
 ```
 
 ---
 
-## The 4 Killer Features
+## Core Capabilities
 
-1. **Repository-Grounded Proposal Verification** — Bedrock extracts structured claims; the deterministic verifier independently checks file existence, symbol presence, and test infrastructure against the actual Git tree.
-2. **Evidence-Backed Assignment Gate** — DynamoDB conditional transactions enforce exactly one active lease per issue. Generic "assign me" requests without technical substance are rejected.
-3. **Proposal → PR Integrity Loop** — When a PR is opened, the system compares the actual diff against the verified implementation intent. Same-PR drift across commits is immediately flagged for maintainer review.
-4. **Safe Autonomous Escalation & Live Evidence** — Ambiguous proposals, prompt injections, Bedrock failures, and stale workers escalate to human maintainers rather than granting unauthorized access. All state and evidence are transparently viewable on the live Amplify dashboard.
+1. **Repository-Grounded Proposal Verification** — Amazon Bedrock extracts structured claims; the deterministic verifier independently checks file existence, symbol presence, and test infrastructure against the Git tree.
+2. **Evidence-Backed Assignment** — DynamoDB conditional transactions enforce exactly one active lease per issue. Proposals without technical substance are rejected or flagged for revision.
+3. **Proposal-to-PR Integrity Loop** — When a pull request is opened, the system compares the actual diff against the verified implementation intent. Scope drift across commits is flagged for maintainer review.
+4. **Human Escalation on Uncertainty** — Ambiguous proposals, prompt injections, and stale workers escalate to human maintainers rather than making unauthorized state modifications. Maintainer actions on GitHub take precedence and reconcile cleanly.
 
 ---
 
@@ -70,26 +70,26 @@ The following are explicitly **out of scope**:
 
 ---
 
-## Success Criteria
+## Verification & Acceptance Criteria
 
-| Criterion | Measurable Proof |
+| Area | Verification Criteria |
 | :--- | :--- |
-| False repository claims are rejected | Eval E02, E03, E06: Verifier marks fabricated claims `CONTRADICTED`. |
-| One active lease maximum per issue | Eval E08: 100 concurrent claims on fresh Issue #43 → exactly 1 lease granted. |
-| Duplicate webhooks do not duplicate work | Eval E07: Same delivery ID ×10 → 1 logical workflow. |
-| Stale workers cannot mutate new leases | Eval E09: Expired worker fails DynamoDB fencing condition. |
-| Unrelated PR diffs flagged as DRIFT | Eval E12: Same PR commit B adding unrelated file → `DRIFT`. |
-| Maintainer override always wins | Eval E13: Human reassignment persists; stale automation halts. |
-| Prompt injection does not affect authority | Eval E04, E05: Adversarial input parsed but state unaffected. |
-| GitHub timeout-after-success handled | Eval E10: Retry reconciles without duplicate assignment. |
-| Live judge-facing deployment accessible | Live Amplify URL renders real evidence and operational counters. |
+| Inaccurate claims rejected | Eval E02, E03, E06: Verifier marks fabricated or missing claims `CONTRADICTED`. |
+| Single-lease guarantee | Eval E08: 100 concurrent claims on fresh Issue #43 → exactly 1 lease granted. |
+| Duplicate event resilience | Eval E07: Same delivery ID ×10 → 1 logical workflow. |
+| Stale worker fencing | Eval E09: Expired worker fails DynamoDB fencing condition. |
+| Drift detection across commits | Eval E12: Same PR commit B adding unrelated file → `DRIFT`. |
+| Maintainer precedence | Eval E13: Human reassignment persists; stale automation halts. |
+| Prompt injection defense | Eval E04, E05: Adversarial input parsed as data; authoritative state unaffected. |
+| Idempotent external side effects | Eval E10: Retry reconciles without duplicate assignment. |
+| Live dashboard accessibility | Read-only Amplify URL displays real evidence and operational counters. |
 
 ---
 
-## Trust Boundary
+## Trust Boundaries & System Authority
 
-- **Bedrock does not grant issue ownership.** It extracts and interprets claims.
-- **Deterministic code verifies claims** against real repository evidence.
-- **DynamoDB performs authoritative state transitions** via conditional writes.
+- **Bedrock does not grant issue ownership.** It parses and structures claims from natural language text.
+- **Deterministic code verifies claims** against repository code and structure.
+- **DynamoDB is authoritative for internal state transitions** via conditional writes, while GitHub maintainer actions take precedence and reconcile upon detection.
 - **Repository content is untrusted data**, never system instructions.
-- **PR integrity means matching verified intent**, not proving code correctness.
+- **PR integrity means matching verified intent**, not proving complete code correctness.

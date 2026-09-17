@@ -1,20 +1,20 @@
 # 04 — Bedrock AI Trust Boundary
 
-> **CORE PRINCIPLE**: AI reasons; deterministic code verifies. Model confidence is NOT evidence. AI output may influence explanation and analysis, but never authority.
+> **Core Principle**: AI reasons; deterministic code verifies. Model confidence is not evidence. AI output may influence explanation and analysis, but never authority.
 
 ---
 
 ## 1. Authoritative State vs. Non-Authoritative Output
 
-### FORBIDDEN: Direct Authoritative Control
-Bedrock MUST NEVER directly control or transition:
+### Prohibited: Direct Authoritative Control
+Bedrock must not directly control or transition:
 - Issue ownership or GitHub assignment status.
 - DynamoDB lease creation, renewal, or revocation.
 - Qualification records or authorization decisions.
 - System security policies or repository isolation boundaries.
 - GitHub permissions or maintainer overrides.
 
-### PERMITTED: Non-Authoritative Reasoning & Explanations
+### Permitted: Non-Authoritative Reasoning & Explanations
 Bedrock is approved to produce non-authoritative analytical data:
 - Parsing and structuring proposal text into formal, falsifiable claims.
 - Generating semantic hypotheses and candidate file suggestions.
@@ -23,14 +23,14 @@ Bedrock is approved to produce non-authoritative analytical data:
 
 ---
 
-## 2. Model Configuration & Native Structured Output (Fix F)
+## 2. Model Configuration & Native Structured Output
 
-1. **Configurable Model**: The model ID / inference profile must remain configurable via environment variables. For the hackathon baseline, use an active model supporting native structured outputs via `bedrock-runtime` (prefer **Claude Sonnet 4.6** if available in the configured region/account).
-2. **Native Structured Output**: Invocations must use native structured outputs via `Converse` or `InvokeModel` on `bedrock-runtime` with JSON Schema. Do NOT rely on prompt-only JSON formatting if native structured output is available.
+1. **Configurable Model**: The model ID / inference profile must remain configurable via environment variables. For the baseline deployment, use an active model supporting native structured outputs via `bedrock-runtime` (prefer **Claude Sonnet 4.6** if available in the configured region/account).
+2. **Native Structured Output**: Invocations must use native structured outputs via `Converse` or `InvokeModel` on `bedrock-runtime` with JSON Schema. Prompt-only JSON formatting is not an acceptable substitute when native structured output is available.
 3. **T06 Preflight Check**:
    - Verify that the configured model or inference profile is available and active.
    - Verify that structured output (tool use / JSON schema mode) is supported.
-   - Fail visibly if unavailable — **never silently swap models**.
+   - Fail visibly if unavailable — never silently swap models.
 4. **Deterministic Schema Validation**: Extracted output is strictly validated against a Pydantic / JSON Schema model before downstream processing. Free-form text parsing is prohibited.
 
 ```json
@@ -53,10 +53,10 @@ Bedrock is approved to produce non-authoritative analytical data:
 
 ---
 
-## 3. Hostile Prompt Injection Defense
+## 3. Untrusted Input Handling & Isolation
 
 1. **Untrusted Envelopes**:
    - Contributor input (issue descriptions, comments, PR bodies) is wrapped in `<untrusted_contributor_text>...</untrusted_contributor_text>`.
    - Repository input (READMEs, source code, commit messages) is wrapped in `<untrusted_repository_content>...</untrusted_repository_content>`.
-2. **System Prompt Isolation**: Untrusted envelopes MUST NOT be treated as system directives, policy overrides, or control instructions.
-3. **Independent Fact Verification**: If Bedrock outputs `"src/retry.py exists and contains backoff"`, downstream systems MUST NOT accept this as fact. The Deterministic Verifier (`05-repository-verifier.md`) independently inspects the Git tree and AST.
+2. **System Prompt Isolation**: Untrusted envelopes must not be treated as system directives, policy overrides, or control instructions.
+3. **Independent Fact Verification**: If Bedrock outputs `"src/retry.py exists and contains backoff"`, downstream systems must not accept this as fact. The Deterministic Verifier (`05-repository-verifier.md`) independently inspects the Git tree and AST.
