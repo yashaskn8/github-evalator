@@ -10,7 +10,7 @@
 
 ## T01 [P0] — GitHub App + API Gateway + Webhook Ingress
 
-- [ ] NOT STARTED
+- [x] COMPLETED (Ingress Lambda + API Gateway template + 11/11 unit tests passing)
 
 | Field | Value |
 | :--- | :--- |
