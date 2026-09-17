@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: GitHub Evalator — Webhook Ingress, HMAC Auth, & Authoritative State (T01-T03)
+Description: GitHub Evalator — Webhook Ingress, HMAC Auth, Authoritative State, & SQS Queue (T01-T04)
 
 Globals:
   Function:
@@ -12,14 +12,24 @@ Parameters:
   WebhookSecretArn:
     Type: String
     Description: AWS Secrets Manager ARN containing GitHub webhook secret
-    Default: "arn:aws:secretsmanager:us-east-1:123456789012:secret:github-evaluator-webhook-secret"
 
 Resources:
   # Ingress API Gateway (T01)
   WebhookApi:
     Type: AWS::Serverless::HttpApi
 
-  # Ingress & HMAC Authentication Lambda (T01/T02)
+  # SQS Burst Buffering & Dead-Letter Queue (T04)
+  EventDeadLetterQueue:
+    Type: AWS::SQS::Queue
+
+  EventQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt EventDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  # Ingress & HMAC Authentication Lambda (T01/T02/T04)
   WebhookFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -28,12 +38,17 @@ Resources:
       Environment:
         Variables:
           GITHUB_WEBHOOK_SECRET_ARN: !Ref WebhookSecretArn
+          EVENT_QUEUE_URL: !Ref EventQueue
       Policies:
         - Statement:
             - Effect: Allow
               Action:
                 - secretsmanager:GetSecretValue
               Resource: !Ref WebhookSecretArn
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt EventQueue.Arn
       Events:
         Webhook:
           Type: HttpApi
@@ -68,6 +83,16 @@ Outputs:
   WebhookUrl:
     Description: GitHub webhook ingress URL
     Value: !Sub "https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/webhook"
+  EventQueueUrl:
+    Description: SQS Event Queue URL
+    Value: !Ref EventQueue
+  EventQueueArn:
+    Description: SQS Event Queue ARN
+    Value: !GetAtt EventQueue.Arn
+  EventDeadLetterQueueArn:
+    Description: SQS Event Dead-Letter Queue ARN
+    Value: !GetAtt EventDeadLetterQueue.Arn
   StateTableName:
     Description: Authoritative single-table DynamoDB name
     Value: !Ref StateTable
+

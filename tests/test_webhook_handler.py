@@ -28,13 +28,16 @@ def _compute_sig(raw_bytes: bytes, secret: str = DEFAULT_TEST_SECRET) -> str:
 
 
 @pytest.fixture(autouse=True)
-def inject_default_secret():
-    """Ensure the handler has a valid secret available for tests by default."""
+def inject_default_dependencies(monkeypatch):
+    """Ensure the handler has a valid secret and SQS mock available for tests by default."""
     handler_module._secret_provider_override = lambda: DEFAULT_TEST_SECRET
-    handler_module._cached_secret = DEFAULT_TEST_SECRET
-    yield
+    monkeypatch.setenv("EVENT_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123456789012/test-queue")
+    mock_sqs = Mock()
+    mock_sqs.send_message.return_value = {"MessageId": "mock-msg-001"}
+    monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+    yield mock_sqs
     handler_module._secret_provider_override = None
-    handler_module._cached_secret = None
+
 
 
 def _make_event(
@@ -658,7 +661,6 @@ class TestSecretsManagerFailClosed:
     def test_secrets_manager_failure_returns_503_and_fails_closed(self, monkeypatch, caplog):
         """When Secrets Manager raises ClientError or secret is unavailable, fail closed."""
         handler_module._secret_provider_override = None
-        handler_module._cached_secret = None
         monkeypatch.setenv("GITHUB_WEBHOOK_SECRET_ARN", "arn:aws:secretsmanager:us-east-1:111:secret:sec")
 
         mock_sm_client = Mock()
@@ -688,7 +690,6 @@ class TestSecretsManagerFailClosed:
         bad_sig = "sha256=BAD_SIGNATURE_VALUE_12345"
 
         handler_module._secret_provider_override = lambda: secret
-        handler_module._cached_secret = secret
 
         event, _ = _make_event(
             body_dict=body,
@@ -704,3 +705,370 @@ class TestSecretsManagerFailClosed:
         assert "SUPER_SECRET" not in all_logs
         assert bad_sig not in all_logs
         assert "BAD_SIGNATURE" not in all_logs
+
+
+class TestSecretsManagerRotationWithoutIndefiniteCache:
+    def test_subsequent_requests_observe_rotated_secrets_without_warm_cache(self, monkeypatch, caplog):
+        """Proves no indefinite warm secret caching:
+        Invocation 1 uses Secret A, Invocation 2 uses Secret B.
+        Both authenticate successfully without process restart.
+        """
+        secret_store = {"current": "initial-secret-version-aaa"}
+        handler_module._secret_provider_override = None
+        monkeypatch.setenv("GITHUB_WEBHOOK_SECRET_ARN", "arn:aws:secretsmanager:us-east-1:111:secret:rot")
+
+        mock_sm_client = Mock()
+        mock_sm_client.get_secret_value.side_effect = lambda SecretId: {"SecretString": secret_store["current"]}
+        monkeypatch.setattr(handler_module, "_get_secretsmanager_client", lambda: mock_sm_client)
+
+        body = _issues_opened_body()
+        raw_bytes = json.dumps(body).encode("utf-8")
+
+        # Request 1 with Secret A
+        sig_a = _compute_sig(raw_bytes, secret="initial-secret-version-aaa")
+        event_1, _ = _make_event(body_dict=body, headers={"x-hub-signature-256": sig_a}, sign=False)
+        res_1 = lambda_handler(event_1, None)
+        assert res_1["statusCode"] == 202
+
+        # Rotate secret in Secrets Manager
+        secret_store["current"] = "rotated-secret-version-bbb"
+
+        # Request 2 with Secret B — must succeed without container restart
+        sig_b = _compute_sig(raw_bytes, secret="rotated-secret-version-bbb")
+        event_2, _ = _make_event(body_dict=body, headers={"x-hub-signature-256": sig_b}, sign=False)
+        res_2 = lambda_handler(event_2, None)
+        assert res_2["statusCode"] == 202
+
+        # Verify old Secret A now fails against rotated secret
+        event_old, _ = _make_event(body_dict=body, headers={"x-hub-signature-256": sig_a}, sign=False)
+        res_old = lambda_handler(event_old, None)
+        assert res_old["statusCode"] == 401
+
+
+class TestPreAuthCorrelationUntrustedHeaderIsolation:
+    def test_forged_request_does_not_trust_unauthenticated_github_delivery_header(self, caplog):
+        """Attacker sends forged signature and arbitrary x-github-delivery header.
+        Telemetry correlationId must derive from API Gateway requestId, NOT attacker header.
+        """
+        body = _issues_opened_body()
+        event, _ = _make_event(
+            body_dict=body,
+            headers={
+                "x-github-delivery": "attacker-controlled-delivery-uuid-9999",
+                "x-hub-signature-256": "sha256=badfakeforgedsig0000000000000000000000000000",
+            },
+            sign=False,
+        )
+        # requestContext has requestId: "apigw-req-001"
+        with caplog.at_level(logging.INFO):
+            result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 401
+        log_records = [json.loads(r.message) for r in caplog.records]
+        assert len(log_records) >= 1
+        logged = log_records[-1]
+
+        # The correlationId MUST NOT be the attacker-controlled delivery header
+        assert logged["correlationId"] != "attacker-controlled-delivery-uuid-9999"
+        assert logged["correlationId"] == "apigw-req-001"
+        assert "githubDeliveryId" not in logged or logged.get("githubDeliveryId") is None
+
+    def test_forged_request_without_request_context_falls_back_to_unknown(self, caplog):
+        """Attacker sends forged signature without requestContext; correlationId is 'unknown'."""
+        body = _issues_opened_body()
+        event = {
+            "body": json.dumps(body),
+            "headers": {
+                "x-github-delivery": "attacker-controlled-uuid",
+                "x-hub-signature-256": "sha256=forged00000000000000000000000000000000000",
+            },
+            # No requestContext
+        }
+        with caplog.at_level(logging.INFO):
+            result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 401
+        logged = json.loads(caplog.records[-1].message)
+        assert logged["correlationId"] == "unknown"
+        assert logged["correlationId"] != "attacker-controlled-uuid"
+
+    def test_authenticated_request_switches_to_github_delivery_id(self, caplog):
+        """After HMAC verification succeeds, correlationId matches verified githubDeliveryId."""
+        body = _issues_opened_body()
+        event, _ = _make_event(
+            body_dict=body,
+            headers={
+                "x-github-delivery": "verified-delivery-uuid-777",
+                "x-github-event": "issues",
+            },
+        )
+        with caplog.at_level(logging.INFO):
+            result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 202
+        logged = json.loads(caplog.records[-1].message)
+        assert logged["githubDeliveryId"] == "verified-delivery-uuid-777"
+        assert logged["correlationId"] == "verified-delivery-uuid-777"
+
+
+class TestT04SqsQueueIntegrationAndContract:
+    def test_authenticated_webhook_sends_exactly_one_sqs_message(self, monkeypatch):
+        """Authenticated webhook enqueues exactly one bounded normalized SQS message and returns 202."""
+        mock_sqs = Mock()
+        mock_sqs.send_message.return_value = {"MessageId": "msg-123"}
+        monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+        monkeypatch.setenv("EVENT_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
+
+        body = _issues_opened_body()
+        event, _ = _make_event(
+            body_dict=body,
+            headers={
+                "x-github-delivery": "delivery-sqs-001",
+                "x-github-event": "issues",
+            },
+        )
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 202
+        assert mock_sqs.send_message.call_count == 1
+
+        call_args = mock_sqs.send_message.call_args[1]
+        assert call_args["QueueUrl"] == "https://sqs.us-east-1.amazonaws.com/123/queue"
+
+        msg_body = json.loads(call_args["MessageBody"])
+        # Invariant checks on queue message contract:
+        assert msg_body["schemaVersion"] == "1.0.0"
+        assert msg_body["githubDeliveryId"] == "delivery-sqs-001"
+        assert msg_body["eventType"] == "issues"
+        assert msg_body["action"] == "opened"
+        assert msg_body["installationId"] == 111
+        assert msg_body["repositoryId"] == 12345
+        assert msg_body["issueNumber"] == 42
+        assert msg_body["senderId"] == 67890
+        assert "receivedAt" in msg_body
+        assert msg_body["bodyHash"].startswith("sha256:")
+
+        # STRICT EXCLUSIONS:
+        assert "x-hub-signature-256" not in msg_body
+        assert "headers" not in msg_body
+        assert "authorization" not in msg_body
+        assert "secret" not in msg_body
+        assert "body" not in msg_body
+        # Unrelated fields and full body excluded:
+        assert "title" not in msg_body
+        assert "full_name" not in msg_body
+
+    def test_forged_signature_makes_zero_sqs_calls(self, monkeypatch):
+        mock_sqs = Mock()
+        monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+
+        body = _issues_opened_body()
+        event, _ = _make_event(
+            body_dict=body,
+            headers={"x-hub-signature-256": "sha256=forgedbad"},
+            sign=False,
+        )
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 401
+        assert mock_sqs.send_message.call_count == 0
+
+    def test_secrets_manager_failure_makes_zero_sqs_calls(self, monkeypatch):
+        mock_sqs = Mock()
+        monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+        handler_module._secret_provider_override = None
+        monkeypatch.setenv("GITHUB_WEBHOOK_SECRET_ARN", "arn:aws:secretsmanager:us-east-1:111:secret:sec")
+
+        mock_sm = Mock()
+        mock_sm.get_secret_value.side_effect = ClientError({"Error": {"Code": "500"}}, "GetSecretValue")
+        monkeypatch.setattr(handler_module, "_get_secretsmanager_client", lambda: mock_sm)
+
+        body = _issues_opened_body()
+        event, _ = _make_event(body_dict=body, sign=False)
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 503
+        assert mock_sqs.send_message.call_count == 0
+
+    def test_invalid_json_makes_zero_sqs_calls(self, monkeypatch):
+        mock_sqs = Mock()
+        monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+
+        raw = "not json {{"
+        sig = _compute_sig(raw.encode("utf-8"))
+        event, _ = _make_event(
+            body_str=raw,
+            headers={"x-hub-signature-256": sig},
+            sign=False,
+        )
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 400
+        assert mock_sqs.send_message.call_count == 0
+
+    def test_missing_github_headers_makes_zero_sqs_calls(self, monkeypatch):
+        mock_sqs = Mock()
+        monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+
+        body = _issues_opened_body()
+        raw = json.dumps(body).encode("utf-8")
+        sig = _compute_sig(raw)
+        event = {
+            "body": json.dumps(body),
+            "headers": {
+                "x-hub-signature-256": sig,
+                # Missing x-github-delivery and x-github-event
+            },
+        }
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 400
+        assert mock_sqs.send_message.call_count == 0
+
+    def test_sqs_send_failure_returns_503_and_never_202(self, monkeypatch, caplog):
+        """SQS failure must return controlled retryable 503 so GitHub redelivers; never 202."""
+        mock_sqs = Mock()
+        mock_sqs.send_message.side_effect = ClientError(
+            {"Error": {"Code": "ServiceUnavailable", "Message": "SQS down"}},
+            "SendMessage",
+        )
+        monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+        monkeypatch.setenv("EVENT_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
+
+        body = _issues_opened_body()
+        event, _ = _make_event(body_dict=body)
+
+        with caplog.at_level(logging.INFO):
+            result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 503
+        assert json.loads(result["body"])["status"] == "queue_unavailable"
+        logged = json.loads(caplog.records[-1].message)
+        assert logged["result"] == "queue_error"
+        assert logged["errorClass"] == "sqs_send_failed"
+
+    def test_queue_not_configured_returns_503(self, monkeypatch, caplog):
+        """Missing EVENT_QUEUE_URL returns 503 and fails closed."""
+        monkeypatch.delenv("EVENT_QUEUE_URL", raising=False)
+        body = _issues_opened_body()
+        event, _ = _make_event(body_dict=body)
+
+        with caplog.at_level(logging.INFO):
+            result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 503
+        assert json.loads(result["body"])["status"] == "queue_unavailable"
+        logged = json.loads(caplog.records[-1].message)
+        assert logged["errorClass"] == "queue_not_configured"
+
+    def test_issue_comment_proposal_text_included_with_size_bound(self, monkeypatch):
+        """For issue_comment events, proposal text is normalized into queue message within size bound."""
+        mock_sqs = Mock()
+        mock_sqs.send_message.return_value = {"MessageId": "msg-comment-1"}
+        monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+        monkeypatch.setenv("EVENT_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
+
+        body = {
+            "action": "created",
+            "repository": {"id": 12345},
+            "issue": {"number": 42},
+            "comment": {"id": 999, "body": "I propose modifying retry logic in src/retry.py"},
+            "sender": {"id": 67890},
+            "installation": {"id": 111},
+        }
+        event, _ = _make_event(
+            body_dict=body,
+            headers={
+                "x-github-delivery": "delivery-comment-001",
+                "x-github-event": "issue_comment",
+            },
+        )
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 202
+        msg = json.loads(mock_sqs.send_message.call_args[1]["MessageBody"])
+        assert msg["eventType"] == "issue_comment"
+        assert msg["issueNumber"] == 42
+        assert msg["commentBody"] == "I propose modifying retry logic in src/retry.py"
+
+    def test_oversize_comment_body_rejected_with_400_and_zero_sqs_calls(self, monkeypatch, caplog):
+        """A comment exceeding 64KB must be rejected with 400 without enqueuing to SQS."""
+        mock_sqs = Mock()
+        monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+        monkeypatch.setenv("EVENT_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
+
+        oversize_text = "A" * (65536 + 10)
+        body = {
+            "action": "created",
+            "repository": {"id": 12345},
+            "issue": {"number": 42},
+            "comment": {"id": 999, "body": oversize_text},
+            "sender": {"id": 67890},
+            "installation": {"id": 111},
+        }
+        event, _ = _make_event(
+            body_dict=body,
+            headers={
+                "x-github-delivery": "delivery-comment-oversize",
+                "x-github-event": "issue_comment",
+            },
+        )
+        with caplog.at_level(logging.INFO):
+            result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 400
+        assert json.loads(result["body"])["status"] == "payload_too_large"
+        assert mock_sqs.send_message.call_count == 0
+        logged = json.loads(caplog.records[-1].message)
+        assert logged["errorClass"] == "payload_too_large"
+
+    def test_duplicate_authenticated_deliveries_may_each_enqueue(self, monkeypatch):
+        """Duplicate authenticated deliveries each enqueue to SQS; T05 performs authoritative DynamoDB dedup."""
+        mock_sqs = Mock()
+        mock_sqs.send_message.return_value = {"MessageId": "msg-dup"}
+        monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+        monkeypatch.setenv("EVENT_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
+
+        body = _issues_opened_body()
+        event, _ = _make_event(
+            body_dict=body,
+            headers={"x-github-delivery": "delivery-dup-001", "x-github-event": "issues"},
+        )
+        # Send twice
+        res1 = lambda_handler(event, None)
+        res2 = lambda_handler(event, None)
+
+        assert res1["statusCode"] == 202
+        assert res2["statusCode"] == 202
+        # SQS buffers both; downstream DynamoDB EVENT#<deliveryId> performs atomic dedup
+        assert mock_sqs.send_message.call_count == 2
+
+    def test_webhook_handler_makes_zero_dynamodb_calls(self, monkeypatch):
+        """Webhook Lambda must have NO DynamoDB access or calls (separation of concerns)."""
+        mock_dynamo = Mock()
+        monkeypatch.setattr("boto3.client", lambda service, **kwargs: mock_dynamo if service == "dynamodb" else Mock())
+
+        body = _issues_opened_body()
+        event, _ = _make_event(body_dict=body)
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 202
+        assert mock_dynamo.put_item.call_count == 0
+        assert mock_dynamo.get_item.call_count == 0
+
+
+class TestSamInfrastructureQueueConfig:
+    def test_template_defines_standard_queue_and_dlq_with_redrive(self):
+        """Verify SAM template configures EventQueue and EventDeadLetterQueue with maxReceiveCount=3."""
+        with open("template.yaml", "r", encoding="utf-8") as f:
+            content = f.read()
+
+        assert "EventQueue:" in content
+        assert "EventDeadLetterQueue:" in content
+        assert "AWS::SQS::Queue" in content
+        assert "maxReceiveCount: 3" in content
+        assert "deadLetterTargetArn: !GetAtt EventDeadLetterQueue.Arn" in content
+        assert "FifoQueue: true" not in content  # Standard queues only
+        assert "sqs:SendMessage" in content
+        assert 'Default: "arn:aws:secretsmanager' not in content  # Fake default removed
+

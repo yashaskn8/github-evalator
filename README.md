@@ -171,4 +171,13 @@ docs/
 
 ## Implementation Status
 
-T01 webhook ingress is implemented and unit-tested. Live AWS/GitHub verification is pending. T02 and later pipeline stages are not yet implemented.
+T01 webhook ingress is implemented and unit-tested; live AWS/GitHub verification is pending.
+
+T02 HMAC-SHA256 webhook authentication is implemented and locally adversarial-tested; live Secrets Manager/GitHub verification is pending.
+
+T03 DynamoDB authoritative state schema and state contracts are implemented and locally tested; live DynamoDB verification is pending.
+
+T04 Amazon SQS Standard queue, DLQ, and webhook enqueue are implemented and locally tested; live AWS verification is pending.
+
+T05 and later pipeline stages are not yet implemented.
+

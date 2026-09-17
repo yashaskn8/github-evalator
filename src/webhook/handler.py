@@ -1,14 +1,22 @@
-"""GitHub Evalator — Webhook Ingress & HMAC Authentication (T01/T02).
+"""GitHub Evalator — Webhook Ingress, HMAC Authentication, & SQS Enqueue (T01-T04).
 
 Receives GitHub webhook events via API Gateway HTTP API (payload format 2.0).
 Recovers unmodified payload bytes, verifies X-Hub-Signature-256 HMAC-SHA256
-signature using secret from AWS Secrets Manager, validates required GitHub
-headers, parses JSON payload object, emits safe structured telemetry, and
-returns HTTP 202.
+signature using secret from AWS Secrets Manager (retrieved per-request to support
+rotation without indefinite warm-Lambda caching), validates required GitHub
+headers, parses JSON payload object, safely normalizes event data, enqueues
+bounded normalized event to Amazon SQS Standard queue, emits safe structured
+telemetry, and returns HTTP 202.
 
-Execution invariant:
-No JSON parsing, metadata processing, or application logic occurs before
-cryptographic authentication succeeds.
+Execution invariants:
+1. No JSON parsing, metadata processing, or application logic occurs before
+   cryptographic authentication succeeds.
+2. Pre-authentication log correlation derives strictly from AWS infrastructure
+   request IDs (API Gateway / Lambda), never untrusted request headers.
+3. Webhook secret is never cached indefinitely in Lambda memory.
+4. Only normalized, bounded metadata is enqueued to SQS; raw payloads, secrets,
+   and auth headers are strictly excluded.
+5. Queue send failure returns 503; HTTP 202 is returned ONLY when SQS enqueue succeeds.
 """
 
 import base64
@@ -19,6 +27,7 @@ import json
 import logging
 import os
 import time
+from typing import Any, Dict, Optional, Tuple
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -28,6 +37,7 @@ logger.setLevel(logging.INFO)
 
 # Explicit allowlist of fields permitted in telemetry output.
 # Anything not in this set is silently dropped by log_event().
+# Raw bodies, comments, secrets, and auth headers must NEVER appear here.
 _ALLOWED_FIELDS = frozenset({
     "githubDeliveryId",
     "eventType",
@@ -43,9 +53,12 @@ _ALLOWED_FIELDS = frozenset({
     "errorClass",
 })
 
-# Module-level Secrets Manager state
+# Maximum permitted comment body length in bytes for issue_comment events (64 KB)
+MAX_COMMENT_BODY_BYTES = 65536
+
+# Module-level AWS clients and injection overrides
 _secretsmanager_client = None
-_cached_secret = None
+_sqs_client = None
 _secret_provider_override = None
 
 
@@ -62,21 +75,27 @@ def _get_secretsmanager_client():
     return _secretsmanager_client
 
 
-def _get_webhook_secret():
+def _get_sqs_client():
+    global _sqs_client
+    if _sqs_client is None:
+        _sqs_client = boto3.client("sqs")
+    return _sqs_client
+
+
+def _get_webhook_secret() -> Optional[str]:
     """Retrieve the GitHub webhook secret securely from Secrets Manager or injectable provider.
+
+    Does not cache indefinitely in global memory: retrieves the current secret
+    per request to ensure rotation takes effect immediately.
 
     Returns:
         str | None: The plaintext secret string, or None if unavailable.
     """
-    global _cached_secret
     if _secret_provider_override is not None:
         try:
             return _secret_provider_override()
         except Exception:
             return None
-
-    if _cached_secret is not None:
-        return _cached_secret
 
     secret_arn = os.environ.get("GITHUB_WEBHOOK_SECRET_ARN")
     if not secret_arn:
@@ -85,18 +104,13 @@ def _get_webhook_secret():
     try:
         client = _get_secretsmanager_client()
         response = client.get_secret_value(SecretId=secret_arn)
-        secret_val = response.get("SecretString")
-        if secret_val:
-            _cached_secret = secret_val
-            return secret_val
+        return response.get("SecretString")
     except (BotoCoreError, ClientError, Exception):
         # Fail closed on any Secrets Manager exception; never leak details
         return None
 
-    return None
 
-
-def _verify_hmac_signature(raw_body_bytes: bytes, signature_header: str | None, secret: str) -> tuple[bool, str]:
+def _verify_hmac_signature(raw_body_bytes: bytes, signature_header: Optional[str], secret: str) -> Tuple[bool, str]:
     """Verify GitHub X-Hub-Signature-256 header using constant-time comparison.
 
     Returns:
@@ -123,11 +137,8 @@ def _verify_hmac_signature(raw_body_bytes: bytes, signature_header: str | None, 
     return True, ""
 
 
-def _recover_body_bytes(event):
+def _recover_body_bytes(event: Any) -> Tuple[bytes, Optional[str]]:
     """Recover payload bytes from the API Gateway v2 event without reserialization.
-
-    Payload bytes are reconstructed from the API Gateway v2 event without JSON
-    reserialization and are ready for T02 signature verification.
 
     Returns:
         tuple[bytes, str | None]: (raw_bytes, error_class).
@@ -168,7 +179,7 @@ def _recover_body_bytes(event):
     return b"", "invalid_body"
 
 
-def _normalize_headers(event):
+def _normalize_headers(event: Any) -> Dict[str, Any]:
     """Build a lowercase header map for case-insensitive lookups."""
     if not isinstance(event, dict):
         return {}
@@ -178,16 +189,17 @@ def _normalize_headers(event):
     return {str(k).lower(): v for k, v in headers.items() if k is not None}
 
 
-def _resolve_correlation_id(headers, event, context):
-    """Determine correlation token in priority order:
-    1. x-github-delivery when present
-    2. API Gateway requestContext.requestId
-    3. Lambda context.aws_request_id
-    4. final safe fallback 'unknown'
+def _resolve_preauth_correlation_id(event: Any, context: Any) -> str:
+    """Determine correlation token strictly from trusted AWS infrastructure metadata.
+
+    Before cryptographic authentication succeeds, HTTP headers (including
+    x-github-delivery) are attacker-controlled and MUST NOT be trusted for
+    log correlation.
+    Priority:
+    1. API Gateway requestContext.requestId
+    2. Lambda context.aws_request_id
+    3. Safe fallback 'unknown'
     """
-    delivery = headers.get("x-github-delivery")
-    if delivery:
-        return str(delivery)
     if isinstance(event, dict):
         req_ctx = event.get("requestContext")
         if isinstance(req_ctx, dict):
@@ -201,9 +213,9 @@ def _resolve_correlation_id(headers, event, context):
     return "unknown"
 
 
-def _extract_safe_metadata(parsed_body):
+def _extract_safe_metadata(parsed_body: Any) -> Dict[str, Any]:
     """Extract only safe metadata fields from the parsed webhook body."""
-    meta = {}
+    meta: Dict[str, Any] = {}
     if not isinstance(parsed_body, dict):
         return meta
     meta["action"] = parsed_body.get("action")
@@ -222,7 +234,37 @@ def _extract_safe_metadata(parsed_body):
     return meta
 
 
-def _json_response(status_code, body_dict):
+def _build_queue_message(
+    github_delivery_id: str,
+    event_type: str,
+    body_hash: str,
+    meta: Dict[str, Any],
+    comment_body: Optional[str],
+    received_at: int,
+) -> Dict[str, Any]:
+    """Build bounded normalized message for downstream SQS dispatch (T04).
+
+    Strictly excludes HMAC signature, auth headers, and raw webhook payload.
+    """
+    msg: Dict[str, Any] = {
+        "schemaVersion": "1.0.0",
+        "githubDeliveryId": github_delivery_id,
+        "eventType": event_type,
+        "action": meta.get("action"),
+        "installationId": meta.get("installationId"),
+        "repositoryId": meta.get("repositoryId"),
+        "senderId": meta.get("senderId"),
+        "receivedAt": received_at,
+        "bodyHash": body_hash,
+    }
+    if meta.get("issueNumber") is not None:
+        msg["issueNumber"] = meta.get("issueNumber")
+    if comment_body is not None:
+        msg["commentBody"] = comment_body
+    return msg
+
+
+def _json_response(status_code: int, body_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Build API Gateway v2 HTTP response with explicit Content-Type header."""
     return {
         "statusCode": status_code,
@@ -233,32 +275,35 @@ def _json_response(status_code, body_dict):
     }
 
 
-def lambda_handler(event, context):
-    """Webhook ingress & HMAC authentication entry point."""
+def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
+    """Webhook ingress, HMAC authentication, & SQS enqueue entry point."""
     start_time = time.perf_counter()
+    received_at = int(time.time())
+
+    # Pre-authentication correlation ID uses infrastructure request IDs only.
+    preauth_correlation_id = _resolve_preauth_correlation_id(event, context)
 
     # Step 1: Normalize headers for case-insensitive access
     headers = _normalize_headers(event)
-    correlation_id = _resolve_correlation_id(headers, event, context)
 
     # Step 2: Recover exact payload bytes BEFORE authentication
     raw_bytes, body_error = _recover_body_bytes(event)
     if body_error is not None:
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
         log_event(
-            correlationId=correlation_id,
+            correlationId=preauth_correlation_id,
             latencyMs=elapsed_ms,
             result="invalid_payload",
             errorClass=body_error,
         )
         return _json_response(400, {"status": "invalid_payload"})
 
-    # Step 3: Retrieve webhook secret (fail closed if unavailable)
+    # Step 3: Retrieve webhook secret (fail closed if unavailable; queries SM per request)
     secret = _get_webhook_secret()
     if secret is None:
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
         log_event(
-            correlationId=correlation_id,
+            correlationId=preauth_correlation_id,
             latencyMs=elapsed_ms,
             result="authentication_error",
             errorClass="secret_unavailable",
@@ -271,7 +316,7 @@ def lambda_handler(event, context):
     if not is_valid:
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
         log_event(
-            correlationId=correlation_id,
+            correlationId=preauth_correlation_id,
             latencyMs=elapsed_ms,
             result="unauthorized",
             errorClass=sig_error,
@@ -286,13 +331,16 @@ def lambda_handler(event, context):
     if not github_delivery_id or not event_type or not str(github_delivery_id).strip() or not str(event_type).strip():
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
         log_event(
-            correlationId=correlation_id,
+            correlationId=preauth_correlation_id,
             latencyMs=elapsed_ms,
             result="invalid_payload",
             errorClass="missing_github_headers",
         )
         return _json_response(400, {"status": "invalid_webhook"})
 
+    # Now that HMAC is verified and delivery header is validated, switch to GitHub delivery ID
+    correlation_id = str(github_delivery_id)
+    event_type_str = str(event_type).strip()
     body_hash = "sha256:" + hashlib.sha256(raw_bytes).hexdigest()
 
     # Step 6: Parse body as JSON from raw bytes
@@ -302,8 +350,8 @@ def lambda_handler(event, context):
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
         log_event(
             correlationId=correlation_id,
-            githubDeliveryId=github_delivery_id,
-            eventType=event_type,
+            githubDeliveryId=correlation_id,
+            eventType=event_type_str,
             bodyHash=body_hash,
             latencyMs=elapsed_ms,
             result="invalid_payload",
@@ -316,8 +364,8 @@ def lambda_handler(event, context):
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
         log_event(
             correlationId=correlation_id,
-            githubDeliveryId=github_delivery_id,
-            eventType=event_type,
+            githubDeliveryId=correlation_id,
+            eventType=event_type_str,
             bodyHash=body_hash,
             latencyMs=elapsed_ms,
             result="invalid_payload",
@@ -328,10 +376,76 @@ def lambda_handler(event, context):
     # Step 8: Extract safe metadata from authenticated and validated object
     meta = _extract_safe_metadata(parsed_body)
 
+    # Step 9: If issue_comment, extract proposal text with enforced size bound
+    comment_body: Optional[str] = None
+    if event_type_str == "issue_comment":
+        comment_obj = parsed_body.get("comment")
+        if isinstance(comment_obj, dict):
+            raw_comment = comment_obj.get("body")
+            if isinstance(raw_comment, str):
+                if len(raw_comment.encode("utf-8")) > MAX_COMMENT_BODY_BYTES:
+                    elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+                    log_event(
+                        correlationId=correlation_id,
+                        githubDeliveryId=correlation_id,
+                        eventType=event_type_str,
+                        bodyHash=body_hash,
+                        latencyMs=elapsed_ms,
+                        result="invalid_payload",
+                        errorClass="payload_too_large",
+                    )
+                    return _json_response(400, {"status": "payload_too_large"})
+                comment_body = raw_comment
+
+    # Step 10: Build bounded normalized message for SQS
+    queue_message = _build_queue_message(
+        github_delivery_id=correlation_id,
+        event_type=event_type_str,
+        body_hash=body_hash,
+        meta=meta,
+        comment_body=comment_body,
+        received_at=received_at,
+    )
+
+    # Step 11: Enqueue normalized event to SQS Standard Queue (T04)
+    queue_url = os.environ.get("EVENT_QUEUE_URL")
+    if not queue_url:
+        elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+        log_event(
+            correlationId=correlation_id,
+            githubDeliveryId=correlation_id,
+            eventType=event_type_str,
+            bodyHash=body_hash,
+            latencyMs=elapsed_ms,
+            result="queue_error",
+            errorClass="queue_not_configured",
+        )
+        return _json_response(503, {"status": "queue_unavailable"})
+
+    try:
+        sqs = _get_sqs_client()
+        sqs.send_message(
+            QueueUrl=queue_url,
+            MessageBody=json.dumps(queue_message),
+        )
+    except (BotoCoreError, ClientError, Exception):
+        elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+        log_event(
+            correlationId=correlation_id,
+            githubDeliveryId=correlation_id,
+            eventType=event_type_str,
+            bodyHash=body_hash,
+            latencyMs=elapsed_ms,
+            result="queue_error",
+            errorClass="sqs_send_failed",
+        )
+        return _json_response(503, {"status": "queue_unavailable"})
+
+    # Step 12: Success — Emit structured telemetry & return HTTP 202
     elapsed_ms = int((time.perf_counter() - start_time) * 1000)
     log_event(
-        githubDeliveryId=github_delivery_id,
-        eventType=event_type,
+        githubDeliveryId=correlation_id,
+        eventType=event_type_str,
         action=meta.get("action"),
         repositoryId=meta.get("repositoryId"),
         issueNumber=meta.get("issueNumber"),
@@ -344,3 +458,4 @@ def lambda_handler(event, context):
     )
 
     return _json_response(202, {"status": "accepted"})
+

@@ -58,7 +58,8 @@
 
 ## T04 [P0] — Amazon SQS Standard + Dead-Letter Queue (DLQ)
 
-- [ ] NOT STARTED
+- [ ] IMPLEMENTED — LIVE VERIFICATION PENDING
+
 
 | Field | Value |
 | :--- | :--- |
