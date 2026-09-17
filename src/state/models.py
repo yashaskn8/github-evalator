@@ -88,11 +88,16 @@ def build_event_admission_request(
     delivery_id: str,
     event_type: str,
     installation_id: Optional[int] = None,
+    repository_id: Optional[int] = None,
+    body_hash: Optional[str] = None,
+    workflow_input_hash: Optional[str] = None,
     admitted_at: Optional[float] = None,
     ttl_seconds: int = 86400,
 ) -> Dict[str, Any]:
-    """Build atomic PutItem request for webhook event admission.
+    """Build atomic PutItem request for webhook event admission (T03/T05).
     
+    Binds admitted event to deliveryId, eventType, installationId, repositoryId,
+    bodyHash, and workflowInputHash.
     Condition: attribute_not_exists(PK) guarantees duplicate deliveries are
     safely rejected without race conditions.
     """
@@ -102,6 +107,7 @@ def build_event_admission_request(
         "PK": {"S": pk},
         "SK": {"S": "METADATA"},
         "deliveryId": {"S": delivery_id},
+        "githubDeliveryId": {"S": delivery_id},
         "eventType": {"S": event_type},
         "admittedAt": {"N": str(int(now))},
         "status": {"S": "ADMITTED"},
@@ -109,11 +115,61 @@ def build_event_admission_request(
     }
     if installation_id is not None:
         item["installationId"] = {"N": str(installation_id)}
+    if repository_id is not None:
+        item["repositoryId"] = {"N": str(repository_id)}
+    if body_hash is not None:
+        item["bodyHash"] = {"S": body_hash}
+    if workflow_input_hash is not None:
+        item["workflowInputHash"] = {"S": workflow_input_hash}
 
     return {
         "TableName": table_name,
         "Item": item,
         "ConditionExpression": "attribute_not_exists(PK)",
+    }
+
+
+def build_event_workflow_started_update_request(
+    table_name: str,
+    delivery_id: str,
+    workflow_execution_arn: str,
+    expected_workflow_input_hash: str,
+    started_at: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Build UpdateItem request transitioning an admitted event to STARTED status (T05).
+
+    Fails closed if the event does not exist, if the workflowInputHash does not match,
+    or if the event is already started under a DIFFERENT execution ARN.
+    Idempotent: succeeds if status is already STARTED with the EXACT same execution ARN.
+    """
+    now = started_at if started_at is not None else time.time()
+    pk = format_event_pk(delivery_id)
+    return {
+        "TableName": table_name,
+        "Key": {
+            "PK": {"S": pk},
+            "SK": {"S": "METADATA"},
+        },
+        "UpdateExpression": (
+            "SET #status = :started, "
+            "workflowExecutionArn = :arn, "
+            "workflowStartedAt = :started_at"
+        ),
+        "ConditionExpression": (
+            "attribute_exists(PK) AND "
+            "workflowInputHash = :expected_hash AND "
+            "(#status = :admitted OR (#status = :started AND workflowExecutionArn = :arn))"
+        ),
+        "ExpressionAttributeNames": {
+            "#status": "status",
+        },
+        "ExpressionAttributeValues": {
+            ":started": {"S": "STARTED"},
+            ":admitted": {"S": "ADMITTED"},
+            ":arn": {"S": workflow_execution_arn},
+            ":expected_hash": {"S": expected_workflow_input_hash},
+            ":started_at": {"N": str(int(now))},
+        },
     }
 
 

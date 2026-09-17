@@ -179,5 +179,7 @@ T03 DynamoDB authoritative state schema and state contracts are implemented and 
 
 T04 Amazon SQS Standard queue, DLQ, and webhook enqueue are implemented and locally tested; live AWS verification is pending.
 
-T05 and later pipeline stages are not yet implemented.
+T05 Dispatcher Lambda, atomic DynamoDB event admission, crash-recovery orchestration, and Standard Step Functions scaffolding are implemented and locally tested; live AWS verification is pending.
+
+T06 and later pipeline stages are not yet implemented.
 

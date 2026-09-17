@@ -75,7 +75,7 @@
 
 ## T05 [P0] — Dispatcher Lambda + Atomic Event Admission
 
-- [ ] NOT STARTED
+- [ ] IMPLEMENTED — LIVE VERIFICATION PENDING
 
 | Field | Value |
 | :--- | :--- |

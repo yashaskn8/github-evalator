@@ -1902,8 +1902,8 @@ class TestSamInfrastructureQueueConfig:
         assert "secretsmanager:GetSecretValue" in content
         assert "sqs:SendMessage" in content
 
-        # Must NOT have these permissions
-        assert "dynamodb:" not in content or "dynamodb:" not in content.split("WebhookFunction")[1].split("Events")[0]
-        assert "states:" not in content
-        assert "bedrock:" not in content
-        assert "s3:" not in content
+        webhook_block = content.split("WebhookFunction")[1].split("Events")[0]
+        assert "dynamodb:" not in webhook_block
+        assert "states:" not in webhook_block
+        assert "bedrock:" not in webhook_block
+        assert "s3:" not in webhook_block

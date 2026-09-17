@@ -79,6 +79,56 @@ Resources:
         AttributeName: ttl
         Enabled: true
 
+  # Standard Step Functions Evaluation Workflow (T05 Scaffolding)
+  EvaluationStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Type: STANDARD
+      Definition:
+        Comment: "Deterministic evaluation workflow scaffolding (T05)"
+        StartAt: T05Accepted
+        States:
+          T05Accepted:
+            Type: Pass
+            End: true
+
+  # Event Dispatcher Lambda (T05)
+  DispatcherFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: dispatcher.handler.lambda_handler
+      Environment:
+        Variables:
+          STATE_TABLE_NAME: !Ref StateTable
+          EVALUATION_STATE_MACHINE_ARN: !Ref EvaluationStateMachine
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sqs:ReceiveMessage
+                - sqs:DeleteMessage
+                - sqs:GetQueueAttributes
+              Resource: !GetAtt EventQueue.Arn
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+              Resource: !GetAtt StateTable.Arn
+            - Effect: Allow
+              Action:
+                - states:StartExecution
+              Resource: !Ref EvaluationStateMachine
+      Events:
+        EventQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt EventQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
 Outputs:
   WebhookUrl:
     Description: GitHub webhook ingress URL
@@ -95,4 +145,8 @@ Outputs:
   StateTableName:
     Description: Authoritative single-table DynamoDB name
     Value: !Ref StateTable
+  EvaluationStateMachineArn:
+    Description: Step Functions Evaluation State Machine ARN
+    Value: !Ref EvaluationStateMachine
+
 

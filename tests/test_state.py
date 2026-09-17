@@ -15,6 +15,7 @@ from src.state.models import (
     format_idempotency_sk,
     is_lease_active,
     build_event_admission_request,
+    build_event_workflow_started_update_request,
     build_issue_creation_request,
     build_qualification_request,
     build_verification_run_request,
@@ -95,6 +96,68 @@ class TestEventAdmissionAtomicity:
         assert item["eventType"]["S"] == "issues"
         assert item["status"]["S"] == "ADMITTED"
         assert item["ttl"]["N"] == str(1000 + 86400)
+
+    def test_admission_binds_t05_mandatory_fields(self):
+        """T05 event admission binds deliveryId, installationId, repositoryId, bodyHash, workflowInputHash."""
+        req = build_event_admission_request(
+            table_name=TABLE_NAME,
+            delivery_id="delivery-t05-001",
+            event_type="issues",
+            installation_id=INSTALLATION_ID,
+            repository_id=REPO_ID,
+            body_hash="sha256:abc123bodyhash",
+            workflow_input_hash="hash-workflow-input-xyz",
+            admitted_at=2000.0,
+            ttl_seconds=86400,
+        )
+
+        assert req["TableName"] == TABLE_NAME
+        assert req["ConditionExpression"] == "attribute_not_exists(PK)"
+        item = req["Item"]
+        assert item["PK"]["S"] == "EVENT#delivery-t05-001"
+        assert item["SK"]["S"] == "METADATA"
+        assert item["deliveryId"]["S"] == "delivery-t05-001"
+        assert item["githubDeliveryId"]["S"] == "delivery-t05-001"
+        assert item["eventType"]["S"] == "issues"
+        assert item["installationId"]["N"] == str(INSTALLATION_ID)
+        assert item["repositoryId"]["N"] == str(REPO_ID)
+        assert item["bodyHash"]["S"] == "sha256:abc123bodyhash"
+        assert item["workflowInputHash"]["S"] == "hash-workflow-input-xyz"
+        assert item["status"]["S"] == "ADMITTED"
+        assert item["admittedAt"]["N"] == "2000"
+        assert item["ttl"]["N"] == str(2000 + 86400)
+
+
+class TestEventWorkflowStartedUpdate:
+    def test_started_update_enforces_workflow_input_hash_and_status(self):
+        """build_event_workflow_started_update_request builds condition preventing stale/unrelated updates."""
+        req = build_event_workflow_started_update_request(
+            table_name=TABLE_NAME,
+            delivery_id="delivery-t05-001",
+            workflow_execution_arn="arn:aws:states:us-east-1:123:execution:sm:gh-exec-001",
+            expected_workflow_input_hash="hash-workflow-input-xyz",
+            started_at=2005.0,
+        )
+
+        assert req["TableName"] == TABLE_NAME
+        assert req["Key"]["PK"]["S"] == "EVENT#delivery-t05-001"
+        assert req["Key"]["SK"]["S"] == "METADATA"
+        assert "SET #status = :started" in req["UpdateExpression"]
+        assert "workflowExecutionArn = :arn" in req["UpdateExpression"]
+        assert "workflowStartedAt = :started_at" in req["UpdateExpression"]
+
+        cond = req["ConditionExpression"]
+        assert "attribute_exists(PK)" in cond
+        assert "workflowInputHash = :expected_hash" in cond
+        assert "#status = :admitted" in cond
+        assert "workflowExecutionArn = :arn" in cond  # idempotent branch
+
+        vals = req["ExpressionAttributeValues"]
+        assert vals[":started"]["S"] == "STARTED"
+        assert vals[":admitted"]["S"] == "ADMITTED"
+        assert vals[":arn"]["S"] == "arn:aws:states:us-east-1:123:execution:sm:gh-exec-001"
+        assert vals[":expected_hash"]["S"] == "hash-workflow-input-xyz"
+        assert vals[":started_at"]["N"] == "2005"
 
 
 class TestLeaseExpirySemantics:
