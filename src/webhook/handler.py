@@ -56,6 +56,14 @@ _ALLOWED_FIELDS = frozenset({
     "errorClass",
 })
 
+# Supported GitHub event types for the MVP pipeline.
+# Authenticated events not in this set are ignored at ingress (HTTP 202, 0 SQS calls).
+SUPPORTED_EVENT_TYPES = frozenset({
+    "issues",
+    "issue_comment",
+    "pull_request",
+})
+
 # Maximum permitted comment body length in bytes for issue_comment events (64 KB)
 MAX_COMMENT_BODY_BYTES = 65536
 
@@ -356,8 +364,8 @@ def _extract_event_specific_fields(
             return None, "missing_required_field"
         return {}, None
 
-    # Unknown event types pass through without specific validation
-    return None, None
+    # Unsupported event types
+    return None, "unsupported_event"
 
 
 def _build_queue_message(
@@ -512,10 +520,25 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
         )
         return _json_response(400, {"status": "invalid_payload"})
 
-    # Step 8: Extract safe common metadata from authenticated and validated object
+    # Step 8: Filter unsupported GitHub event types
+    # Authenticated unsupported events (e.g. ping, installation) are intentionally
+    # ignored to prevent irrelevant traffic from entering the pipeline.
+    # Emits safe structured log, returns 202, and makes ZERO SQS calls.
+    if event_type_str not in SUPPORTED_EVENT_TYPES:
+        elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+        log_event(
+            githubDeliveryId=correlation_id,
+            eventType=event_type_str,
+            correlationId=correlation_id,
+            latencyMs=elapsed_ms,
+            result="ignored_unsupported_event",
+        )
+        return _json_response(202, {"status": "accepted"})
+
+    # Step 9: Extract safe common metadata from authenticated and validated object
     meta = _extract_safe_metadata(parsed_body)
 
-    # Step 9: Validate and extract event-specific fields
+    # Step 10: Validate and extract event-specific fields
     event_specific, event_error = _extract_event_specific_fields(event_type_str, parsed_body)
     if event_error is not None:
         status_label = "payload_too_large" if event_error == "payload_too_large" else "invalid_webhook"
@@ -531,7 +554,7 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
         )
         return _json_response(400, {"status": status_label})
 
-    # Step 10: Build bounded normalized message for SQS
+    # Step 11: Build bounded normalized message for SQS
     queue_message = _build_queue_message(
         github_delivery_id=correlation_id,
         event_type=event_type_str,
@@ -541,7 +564,7 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
         received_at=received_at,
     )
 
-    # Step 10b: Enforce total serialized message size bound
+    # Step 11b: Enforce total serialized message size bound
     message_body = json.dumps(queue_message)
     message_bytes = len(message_body.encode("utf-8"))
     if message_bytes > MAX_QUEUE_MESSAGE_BYTES:
@@ -557,7 +580,7 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
         )
         return _json_response(400, {"status": "payload_too_large"})
 
-    # Step 11: Enqueue normalized event to SQS Standard Queue (T04)
+    # Step 12: Enqueue normalized event to SQS Standard Queue (T04)
     queue_url = os.environ.get("EVENT_QUEUE_URL")
     if not queue_url:
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
@@ -591,7 +614,7 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
         )
         return _json_response(503, {"status": "queue_unavailable"})
 
-    # Step 12: Success — Emit structured telemetry & return HTTP 202
+    # Step 13: Success — Emit structured telemetry & return HTTP 202
     elapsed_ms = int((time.perf_counter() - start_time) * 1000)
     log_event(
         githubDeliveryId=correlation_id,

@@ -19,6 +19,7 @@ from src.webhook.handler import (
     MAX_COMMENT_BODY_BYTES,
     MAX_QUEUE_MESSAGE_BYTES,
     MAX_STRING_ID_LENGTH,
+    SUPPORTED_EVENT_TYPES,
 )
 
 DEFAULT_TEST_SECRET = "test-webhook-secret-key-xyz-12345"
@@ -1572,21 +1573,277 @@ class TestT04EventSpecificValidation:
         assert result["statusCode"] == 400
         assert mock_sqs.send_message.call_count == 0
 
-    def test_unknown_event_type_passes_through(self, monkeypatch):
-        """Unknown event types (e.g. 'ping') should pass through without event-specific rejection."""
+
+class TestT04UnsupportedEventFiltering:
+    """Ingress hardening: Unsupported authenticated GitHub event types are ignored at ingress.
+
+    1. Authenticated unsupported event -> safe log, HTTP 202, ZERO SQS calls.
+    2. Forged unsupported event -> HTTP 401, ZERO SQS calls.
+    3. Signed unsupported event with malformed JSON -> HTTP 400, ZERO SQS calls.
+    4. Supported events (issues, issue_comment, pull_request) -> process & enqueue normally.
+    """
+
+    def test_supported_event_types_constant_definition(self):
+        """Supported event types must be strictly frozen and contain only the MVP supported events."""
+        assert isinstance(SUPPORTED_EVENT_TYPES, frozenset)
+        assert SUPPORTED_EVENT_TYPES == frozenset({"issues", "issue_comment", "pull_request"})
+
+    def test_signed_ping_returns_202_and_zero_sqs(self, monkeypatch):
+        """1. Signed ping -> 202, zero SQS calls."""
         mock_sqs = Mock()
-        mock_sqs.send_message.return_value = {"MessageId": "msg-ping"}
+        monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+
+        body = {"zen": "Keep it logically awesome.", "hook_id": 12345}
+        event, _ = _make_event(
+            body_dict=body,
+            headers={
+                "x-github-delivery": "delivery-ping-001",
+                "x-github-event": "ping",
+            },
+        )
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 202
+        assert json.loads(result["body"])["status"] == "accepted"
+        assert mock_sqs.send_message.call_count == 0
+
+    def test_signed_installation_event_returns_202_and_zero_sqs(self, monkeypatch):
+        """2. Signed installation event -> 202, zero SQS calls."""
+        mock_sqs = Mock()
+        monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+
+        body = {
+            "action": "created",
+            "installation": {"id": 999999, "account": {"login": "octocat"}},
+            "sender": {"id": 12345},
+        }
+        event, _ = _make_event(
+            body_dict=body,
+            headers={
+                "x-github-delivery": "delivery-inst-001",
+                "x-github-event": "installation",
+            },
+        )
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 202
+        assert json.loads(result["body"])["status"] == "accepted"
+        assert mock_sqs.send_message.call_count == 0
+
+    def test_signed_arbitrary_unsupported_event_returns_202_and_zero_sqs(self, monkeypatch):
+        """3. Signed arbitrary unsupported event (e.g. repository, deployment) -> 202, zero SQS calls."""
+        mock_sqs = Mock()
+        monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+
+        # Test 'repository' event
+        body_repo = {"action": "renamed", "repository": {"id": 55555, "name": "new-name"}}
+        event_repo, _ = _make_event(
+            body_dict=body_repo,
+            headers={"x-github-delivery": "delivery-repo-001", "x-github-event": "repository"},
+        )
+        res_repo = lambda_handler(event_repo, None)
+        assert res_repo["statusCode"] == 202
+        assert mock_sqs.send_message.call_count == 0
+
+        # Test 'deployment' event
+        body_dep = {"action": "created", "deployment": {"id": 777}}
+        event_dep, _ = _make_event(
+            body_dict=body_dep,
+            headers={"x-github-delivery": "delivery-dep-001", "x-github-event": "deployment"},
+        )
+        res_dep = lambda_handler(event_dep, None)
+        assert res_dep["statusCode"] == 202
+        assert mock_sqs.send_message.call_count == 0
+
+    def test_unsupported_event_safe_telemetry(self, monkeypatch, caplog):
+        """4. Unsupported event safe telemetry: result = ignored_unsupported_event, no raw payload."""
+        mock_sqs = Mock()
+        monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+
+        body = {"zen": "Approaching extremes, you make an edge.", "hook_id": 54321}
+        event, _ = _make_event(
+            body_dict=body,
+            headers={
+                "x-github-delivery": "delivery-ping-telemetry",
+                "x-github-event": "ping",
+            },
+        )
+        with caplog.at_level(logging.INFO):
+            result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 202
+        assert mock_sqs.send_message.call_count == 0
+
+        log_records = [json.loads(r.message) for r in caplog.records]
+        assert len(log_records) >= 1
+        logged = log_records[-1]
+
+        # Verify safe fields
+        assert logged["githubDeliveryId"] == "delivery-ping-telemetry"
+        assert logged["eventType"] == "ping"
+        assert logged["correlationId"] == "delivery-ping-telemetry"
+        assert logged["result"] == "ignored_unsupported_event"
+        assert "latencyMs" in logged
+
+        # Verify strictly NO raw payload, secret, or body fields
+        all_logs_text = " ".join(r.message for r in caplog.records)
+        assert "Approaching extremes" not in all_logs_text
+        assert "zen" not in logged
+        assert "body" not in logged
+        assert "secret" not in logged
+        assert "signature" not in logged
+
+    def test_forged_ping_returns_401_and_zero_sqs(self, monkeypatch):
+        """5. Forged ping -> 401, zero SQS calls. Event type never bypasses HMAC."""
+        mock_sqs = Mock()
+        monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+
+        body = {"zen": "Non-resistance is the principle."}
+        event, _ = _make_event(
+            body_dict=body,
+            headers={
+                "x-github-delivery": "delivery-forged-ping",
+                "x-github-event": "ping",
+                "x-hub-signature-256": "sha256=forgedbadbadbadbadbadbadbadbadbadbadbadbad",
+            },
+            sign=False,
+        )
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 401
+        assert json.loads(result["body"])["status"] == "unauthorized"
+        assert mock_sqs.send_message.call_count == 0
+
+    def test_forged_installation_event_returns_401_and_zero_sqs(self, monkeypatch):
+        """6. Forged installation event -> 401, zero SQS calls."""
+        mock_sqs = Mock()
+        monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+
+        body = {"action": "deleted", "installation": {"id": 111}}
+        event, _ = _make_event(
+            body_dict=body,
+            headers={
+                "x-github-delivery": "delivery-forged-inst",
+                "x-github-event": "installation",
+                "x-hub-signature-256": "sha256=forgedbadbadbadbadbadbadbadbadbadbadbadbad",
+            },
+            sign=False,
+        )
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 401
+        assert json.loads(result["body"])["status"] == "unauthorized"
+        assert mock_sqs.send_message.call_count == 0
+
+    def test_validly_signed_ping_with_malformed_json_returns_400_and_zero_sqs(self, monkeypatch):
+        """7. Validly signed ping with malformed JSON -> 400 invalid_payload, zero SQS calls."""
+        mock_sqs = Mock()
+        monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+
+        raw = "not valid json {{"
+        sig = _compute_sig(raw.encode("utf-8"))
+        event = {
+            "body": raw,
+            "headers": {
+                "x-hub-signature-256": sig,
+                "x-github-delivery": "delivery-malformed-ping",
+                "x-github-event": "ping",
+            },
+        }
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 400
+        assert json.loads(result["body"])["status"] == "invalid_payload"
+        assert mock_sqs.send_message.call_count == 0
+
+    def test_supported_issues_event_still_enqueues(self, monkeypatch):
+        """8. Supported issues event -> still enqueues exactly one message."""
+        mock_sqs = Mock()
+        mock_sqs.send_message.return_value = {"MessageId": "msg-issues-ok"}
         monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
         monkeypatch.setenv("EVENT_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
 
-        body = {"action": "completed", "zen": "Anything added dilutes everything else."}
+        body = _issues_opened_body()
         event, _ = _make_event(
             body_dict=body,
-            headers={"x-github-event": "ping"},
+            headers={"x-github-delivery": "delivery-issues-ok", "x-github-event": "issues"},
         )
         result = lambda_handler(event, None)
+
         assert result["statusCode"] == 202
         assert mock_sqs.send_message.call_count == 1
+        msg = json.loads(mock_sqs.send_message.call_args[1]["MessageBody"])
+        assert msg["eventType"] == "issues"
+        assert msg["issueNumber"] == 42
+
+    def test_supported_issue_comment_still_preserves_comment_id_and_body(self, monkeypatch):
+        """9. Supported issue_comment -> still preserves commentId + commentBody."""
+        mock_sqs = Mock()
+        mock_sqs.send_message.return_value = {"MessageId": "msg-ic-ok"}
+        monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+        monkeypatch.setenv("EVENT_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
+
+        body = _issue_comment_body()
+        event, _ = _make_event(
+            body_dict=body,
+            headers={"x-github-delivery": "delivery-ic-ok", "x-github-event": "issue_comment"},
+        )
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 202
+        assert mock_sqs.send_message.call_count == 1
+        msg = json.loads(mock_sqs.send_message.call_args[1]["MessageBody"])
+        assert msg["eventType"] == "issue_comment"
+        assert msg["commentId"] == 987654321
+        assert msg["commentBody"] == "I propose modifying retry logic in src/retry.py"
+
+    def test_supported_pull_request_still_preserves_pr_number_and_head_sha(self, monkeypatch):
+        """10. Supported pull_request -> still preserves pullRequestNumber + pullRequestHeadSha."""
+        mock_sqs = Mock()
+        mock_sqs.send_message.return_value = {"MessageId": "msg-pr-ok"}
+        monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+        monkeypatch.setenv("EVENT_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
+
+        body = _pr_opened_body()
+        event, _ = _make_event(
+            body_dict=body,
+            headers={"x-github-delivery": "delivery-pr-ok", "x-github-event": "pull_request"},
+        )
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 202
+        assert mock_sqs.send_message.call_count == 1
+        msg = json.loads(mock_sqs.send_message.call_args[1]["MessageBody"])
+        assert msg["eventType"] == "pull_request"
+        assert msg["pullRequestNumber"] == 88
+        assert msg["pullRequestHeadSha"] == "abc123def456789abc123def456789abc123def4"
+
+    def test_signed_ping_makes_zero_dynamodb_calls(self, monkeypatch):
+        """Signed ping must make zero DynamoDB calls."""
+        mock_dynamo = Mock()
+        monkeypatch.setattr("boto3.client", lambda service, **kwargs: mock_dynamo if service == "dynamodb" else Mock())
+
+        body = {"zen": "Now is better than never."}
+        event, _ = _make_event(body_dict=body, headers={"x-github-event": "ping"})
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 202
+        assert mock_dynamo.put_item.call_count == 0
+        assert mock_dynamo.get_item.call_count == 0
+
+    def test_signed_ping_does_not_require_application_fields(self, monkeypatch):
+        """A signed ping payload without installation/repository/sender passes without field error."""
+        mock_sqs = Mock()
+        monkeypatch.setattr(handler_module, "_get_sqs_client", lambda: mock_sqs)
+
+        # Minimal ping payload - lacks repo, sender, installation, issue, pr
+        body = {"zen": "In the face of ambiguity, refuse the temptation to guess."}
+        event, _ = _make_event(body_dict=body, headers={"x-github-event": "ping"})
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 202
+        assert json.loads(result["body"])["status"] == "accepted"
+        assert mock_sqs.send_message.call_count == 0
 
 
 class TestT04IdentifierBounds:
