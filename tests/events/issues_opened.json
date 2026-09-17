@@ -1,0 +1,20 @@
+{
+  "version": "2.0",
+  "routeKey": "POST /webhook",
+  "rawPath": "/webhook",
+  "rawQueryString": "",
+  "headers": {
+    "x-github-delivery": "test-delivery-uuid-001",
+    "x-github-event": "issues",
+    "content-type": "application/json"
+  },
+  "requestContext": {
+    "requestId": "test-apigw-req-001",
+    "http": {
+      "method": "POST",
+      "path": "/webhook"
+    }
+  },
+  "body": "{\"action\":\"opened\",\"repository\":{\"id\":99999,\"full_name\":\"test-org/test-repo\"},\"issue\":{\"number\":1,\"title\":\"Test issue\",\"body\":\"Test body\"},\"sender\":{\"id\":10001,\"login\":\"test-user\"},\"installation\":{\"id\":500}}",
+  "isBase64Encoded": false
+}

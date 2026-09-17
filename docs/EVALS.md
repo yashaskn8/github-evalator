@@ -2,6 +2,12 @@
 
 > **Every feature must prove its behavior through measurable evaluations. No fake metrics.**
 
+## Testing Principles
+
+- **Mocks and test doubles are allowed** in unit and integration tests (e.g., simulating GitHub network timeouts, Bedrock throttling, transient DynamoDB exceptions, SQS redeliveries, time-travel clocks for lease expiry).
+- **Fake product behavior is prohibited** in production or demo paths: no hardcoded verification results, synthetic CloudWatch numbers, fake GitHub assignments, fake Bedrock inferences, or simulated race conditions in place of real infrastructure.
+- **Adversarial quality gate**: Before completing any implementation task, verify: (1) How would malicious contributor input affect parsing or verification? (2) How does the component behave under concurrent calls or network retries? (3) What happens if the model hallucinates a plausible file path or symbol? (4) What happens if the external GitHub API fails after modifying state? (5) Can a delayed worker corrupt a newly assigned lease or overwrite a maintainer action?
+
 ---
 
 ## E01 — Valid Repository-Grounded Proposal

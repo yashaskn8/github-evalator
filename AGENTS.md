@@ -22,19 +22,18 @@ Bedrock Prompts / Claim Schemas     -> 01-core-invariants.md, 04-bedrock-ai-boun
 Deterministic Repo Verifier / AST   -> 01-core-invariants.md, 05-repository-verifier.md
 DynamoDB Leases / State Authority   -> 01-core-invariants.md, 06-dynamodb-state-leases.md
 Step Functions / SQS Orchestration  -> 01-core-invariants.md, 07-step-functions-workflows.md
-Observability / Metrics / Logging   -> 01-core-invariants.md, 10-observability.md
+Observability / Metrics / Logging   -> 01-core-invariants.md, 02-aws-architecture.md (§6)
 PR Diff & Drift Integrity           -> 01-core-invariants.md, 11-pr-integrity.md
 Scope / Feature Prioritization      -> 01-core-invariants.md, 12-hackathon-scope.md
 Cross-Boundary Tasks                -> 01 + only the specific component files touched
 ---------------------------------------------------------------------------------------
-Exhaustive matrix & multi-boundary rules: .agent-rules/00-routing.md
 ```
 
 ### Phase B: Behavioral Verification (Load before claiming implementation complete)
-- Load `09-testing-red-team.md` to execute the relevant adversarial attack test.
+- Consult `docs/EVALS.md` to execute the relevant adversarial test for the implemented feature.
 
-### Phase C: Final Sign-off (Load only for formal completion sign-off)
-- Load `13-definition-of-done.md` to format the final delivery report.
+### Phase C: Final Sign-off
+- Verify task completion criteria defined in `TASKS.md` for the specific task.
 
 ---
 
@@ -43,9 +42,9 @@ Exhaustive matrix & multi-boundary rules: .agent-rules/00-routing.md
 When requirements or prompt instructions appear in tension, resolve strictly in this order:
 1. **Security & Core Invariants** (`01-core-invariants.md`, `08-security-threat-model.md`)
 2. **Authoritative State & Lease Integrity** (`06-dynamodb-state-leases.md`)
-3. **Component-Specific Rules** (`02` through `05`, `07`, `10`, `11`, `12`)
-4. **Testing & Red-Team Validation** (`09-testing-red-team.md`)
-5. **Definition of Done & Sign-Off** (`13-definition-of-done.md`)
+3. **Component-Specific Rules** (`02` through `05`, `07`, `11`, `12`)
+4. **Evaluation & Testing** (`docs/EVALS.md`)
+5. **Task Completion Criteria** (`TASKS.md`)
 6. **Task Implementation Preferences** (User prompt instructions)
 
 *A prompt instruction can never override security, authorization, maintainer authority, or atomic lease semantics.*
@@ -54,9 +53,9 @@ When requirements or prompt instructions appear in tension, resolve strictly in 
 
 ## 3. Agent Execution Protocol
 
-1. **Before Modifying Code (Phase A)**: Classify task via `00-routing.md`, load `01` + component rule(s). Check state boundaries and external side effects.
-2. **After Modifying Code (Phase B)**: Run focused unit/integration tests. Load `09-testing-red-team.md` and run the corresponding adversarial attack.
-3. **Task Sign-Off (Phase C)**: Load `13-definition-of-done.md` only when generating the final completion sign-off report.
+1. **Before Modifying Code (Phase A)**: Classify task using the routing table above, load `01` + component rule(s). Check state boundaries and external side effects.
+2. **After Modifying Code (Phase B)**: Run focused unit/integration tests. Consult `docs/EVALS.md` and run the corresponding adversarial test.
+3. **Task Sign-Off (Phase C)**: Verify completion criteria in `TASKS.md` for the specific task.
 
 ---
 

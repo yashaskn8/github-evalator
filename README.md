@@ -170,16 +170,13 @@ Additional tools will be listed here if used during implementation.
 
 ```text
 AGENTS.md                      # Root agent router & global directives
-.agent-rules/                  # Modular task-specific rule system (00 to 13)
+.agent-rules/                  # Modular task-specific rule system
 TASKS.md                       # Implementation plan (T01–T13) with P0/P1 priorities
 .env.example                   # Environment configuration template
 
 docs/
-├── PRD.md                     # Product Requirements Document
 ├── ARCHITECTURE.md            # Architectural specification & cost discipline
-├── THREAT_MODEL.md            # Threat matrix & residual risk analysis
-├── EVALS.md                   # Systematic evaluations (E01–E16)
-└── DEMO.md                    # 3-minute demonstration script
+└── EVALS.md                   # Systematic evaluations (E01–E16) & testing principles
 ```
 
 ---

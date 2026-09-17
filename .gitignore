@@ -18,6 +18,7 @@ env/
 dist/
 build/
 *.egg-info/
+.aws-sam/
 .cdk.staging/
 cdk.out/
 

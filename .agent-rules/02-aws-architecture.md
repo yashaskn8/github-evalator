@@ -93,3 +93,21 @@ Each architecture component implements concrete engineering cost controls:
 - **Amazon S3**: Data minimization; stores large evidence only when necessary, with automated lifecycle expiration.
 - **Amazon Bedrock**: Invoked only after admission and deduplication succeed; strictly bounded input/output tokens; never called for duplicate deliveries.
 - **Amazon Amplify Hosting**: Static hosting for the read-only dashboard that scales on demand.
+
+---
+
+## 6. Observability & Telemetry
+
+> Log real operational events. Zero synthetic or hardcoded metrics for demo purposes.
+
+### Structured Logging
+All Lambda functions and Step Functions tasks emit JSON structured logs with safe correlation context. Allowed fields: `githubDeliveryId`, `eventType`, `action`, `installationId`, `repositoryId`, `issueNumber`, `senderId`, `bodyHash`, `correlationId`, `latency`, `result`, `errorClass`. Private issue bodies, source code, secrets, and raw diff payloads are strictly excluded.
+
+### CloudWatch EMF Metrics
+Emit real runtime operational metrics via Embedded Metric Format:
+- **Ingestion & Latency**: `WebhookLatency`, `VerificationLatency`, `BedrockLatency`, `QueueDepth`.
+- **System Reliability**: `GitHubApiFailureRate`, `WorkflowRetryCount`, `LeaseConflicts`, `DuplicateAssignmentAttempts`.
+- **Domain Outcomes**: `ProposalsVerified`, `ProposalsNeedsRevision`, `HumanEscalations`, `ExpiredLeases`, `ProposalPRDrift`.
+
+### Decision Auditability
+Every system decision (lease grant, proposal revision, PR drift flag) must be fully reconstructible by combining persisted evidence records (in S3/DynamoDB) with correlated CloudWatch logs using `verificationId` or `githubDeliveryId`. Observability failures must not alter authoritative DynamoDB state transitions.

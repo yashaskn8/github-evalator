@@ -1,0 +1,9 @@
+# samconfig.toml — SAM deployment configuration
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "github-evaluator"
+region = "us-east-1"
+resolve_s3 = true
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false

@@ -192,7 +192,7 @@
 | :--- | :--- |
 | **Goal** | Instrument all production components (T01–T11) with structured JSON logging and correlation IDs (`githubDeliveryId`, `verificationId`, `leaseId`). Emit CloudWatch EMF metrics for operations and alarm on DLQ depth. |
 | **Dependencies** | T01, T02, T03, T04, T05, T06, T07, T08, T09, T10, T11 (all production components) |
-| **Rules to Consult** | `01-core-invariants.md`, `10-observability.md` |
+| **Rules to Consult** | `01-core-invariants.md`, `02-aws-architecture.md` (§6) |
 | **Output** | Correlation propagation across all Lambdas; CloudWatch EMF metrics (`WebhookLatency`, `LeaseConflicts`, `ProposalsVerified`, `IntegrityDrifts`); DLQ depth alarm. |
 | **Relevant Evals** | Proves `LeaseConflicts` metric matches actual observed concurrency test value (99). |
 | **Red-Team Gate** | Random audit of `verificationId` reconstructs entire execution trace. Trace confirms zero private repository code or credentials logged. |
@@ -208,7 +208,7 @@
 | :--- | :--- |
 | **Goal** | Execute the complete ≤3-minute demonstration scenario (docs/DEMO.md) on deployed AWS infrastructure and verify all 16 evaluations (E01–E16). Complete final submission checklist. |
 | **Dependencies** | T01–T11 (P0 core), T12 (P1 if implemented) |
-| **Rules to Consult** | `01-core-invariants.md`, `09-testing-red-team.md`, `12-hackathon-scope.md`, `13-definition-of-done.md` |
+| **Rules to Consult** | `01-core-invariants.md`, `docs/EVALS.md`, `12-hackathon-scope.md` |
 | **Output** | Live demo verification; all evals passing; ≤3-minute demo video recorded; final submission checklist completed. |
 | **Relevant Evals** | E01–E16 complete sweep. |
 | **Red-Team Gate** | Adversarial attack suite passes. Zero fake metrics, zero hardcoded responses, zero mocked production paths. |
