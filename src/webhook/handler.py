@@ -1,21 +1,27 @@
-"""GitHub Evalator — Webhook Ingress Lambda (T01).
+"""GitHub Evalator — Webhook Ingress & HMAC Authentication (T01/T02).
 
 Receives GitHub webhook events via API Gateway HTTP API (payload format 2.0).
-Extracts safe metadata, computes a body hash from the unmodified payload bytes,
-emits structured telemetry, and returns HTTP 202.
+Recovers unmodified payload bytes, verifies X-Hub-Signature-256 HMAC-SHA256
+signature using secret from AWS Secrets Manager, validates required GitHub
+headers, parses JSON payload object, emits safe structured telemetry, and
+returns HTTP 202.
 
-Payload bytes are reconstructed from the API Gateway v2 event without JSON
-reserialization and are ready for T02 signature verification.
-This handler is a GitHub-compatible webhook ingress. It is NOT authenticated
-until T02 implements HMAC-SHA256 signature verification.
+Execution invariant:
+No JSON parsing, metadata processing, or application logic occurs before
+cryptographic authentication succeeds.
 """
 
 import base64
 import binascii
 import hashlib
+import hmac
 import json
 import logging
+import os
 import time
+
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -37,11 +43,84 @@ _ALLOWED_FIELDS = frozenset({
     "errorClass",
 })
 
+# Module-level Secrets Manager state
+_secretsmanager_client = None
+_cached_secret = None
+_secret_provider_override = None
+
 
 def log_event(**kwargs):
     """Emit a single structured JSON log line with only allowlisted fields."""
     safe = {k: v for k, v in kwargs.items() if k in _ALLOWED_FIELDS and v is not None}
     logger.info(json.dumps(safe, default=str))
+
+
+def _get_secretsmanager_client():
+    global _secretsmanager_client
+    if _secretsmanager_client is None:
+        _secretsmanager_client = boto3.client("secretsmanager")
+    return _secretsmanager_client
+
+
+def _get_webhook_secret():
+    """Retrieve the GitHub webhook secret securely from Secrets Manager or injectable provider.
+
+    Returns:
+        str | None: The plaintext secret string, or None if unavailable.
+    """
+    global _cached_secret
+    if _secret_provider_override is not None:
+        try:
+            return _secret_provider_override()
+        except Exception:
+            return None
+
+    if _cached_secret is not None:
+        return _cached_secret
+
+    secret_arn = os.environ.get("GITHUB_WEBHOOK_SECRET_ARN")
+    if not secret_arn:
+        return None
+
+    try:
+        client = _get_secretsmanager_client()
+        response = client.get_secret_value(SecretId=secret_arn)
+        secret_val = response.get("SecretString")
+        if secret_val:
+            _cached_secret = secret_val
+            return secret_val
+    except (BotoCoreError, ClientError, Exception):
+        # Fail closed on any Secrets Manager exception; never leak details
+        return None
+
+    return None
+
+
+def _verify_hmac_signature(raw_body_bytes: bytes, signature_header: str | None, secret: str) -> tuple[bool, str]:
+    """Verify GitHub X-Hub-Signature-256 header using constant-time comparison.
+
+    Returns:
+        tuple[bool, str]: (is_valid, error_class)
+    """
+    if not signature_header:
+        return False, "missing_signature"
+
+    if not signature_header.startswith("sha256="):
+        return False, "malformed_signature"
+
+    try:
+        expected = "sha256=" + hmac.new(
+            secret.encode("utf-8"),
+            raw_body_bytes,
+            hashlib.sha256,
+        ).hexdigest()
+    except Exception:
+        return False, "invalid_signature"
+
+    if not hmac.compare_digest(expected, signature_header):
+        return False, "invalid_signature"
+
+    return True, ""
 
 
 def _recover_body_bytes(event):
@@ -155,36 +234,68 @@ def _json_response(status_code, body_dict):
 
 
 def lambda_handler(event, context):
-    """Webhook ingress entry point."""
+    """Webhook ingress & HMAC authentication entry point."""
     start_time = time.perf_counter()
 
-    # Normalize headers for case-insensitive access (safe against headers=None)
+    # Step 1: Normalize headers for case-insensitive access
     headers = _normalize_headers(event)
-
-    # Resolve correlation token safely
     correlation_id = _resolve_correlation_id(headers, event, context)
-    github_delivery_id = headers.get("x-github-delivery")
-    event_type = headers.get("x-github-event")
 
-    # Recover exact payload bytes without reserialization
+    # Step 2: Recover exact payload bytes BEFORE authentication
     raw_bytes, body_error = _recover_body_bytes(event)
-
-    # Handle body recovery errors (missing body, empty body, invalid base64, invalid body type)
     if body_error is not None:
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
         log_event(
             correlationId=correlation_id,
-            githubDeliveryId=github_delivery_id,
-            eventType=event_type,
             latencyMs=elapsed_ms,
             result="invalid_payload",
             errorClass=body_error,
         )
         return _json_response(400, {"status": "invalid_payload"})
 
+    # Step 3: Retrieve webhook secret (fail closed if unavailable)
+    secret = _get_webhook_secret()
+    if secret is None:
+        elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+        log_event(
+            correlationId=correlation_id,
+            latencyMs=elapsed_ms,
+            result="authentication_error",
+            errorClass="secret_unavailable",
+        )
+        return _json_response(503, {"status": "authentication_unavailable"})
+
+    # Step 4: Verify HMAC signature BEFORE JSON parsing or metadata extraction
+    sig_header = headers.get("x-hub-signature-256")
+    is_valid, sig_error = _verify_hmac_signature(raw_bytes, sig_header, secret)
+    if not is_valid:
+        elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+        log_event(
+            correlationId=correlation_id,
+            latencyMs=elapsed_ms,
+            result="unauthorized",
+            errorClass=sig_error,
+        )
+        return _json_response(401, {"status": "unauthorized"})
+
+    # ──────── REQUEST IS CRYPTOGRAPHICALLY AUTHENTICATED BEYOND THIS POINT ────────
+
+    # Step 5: Validate required GitHub headers after authentication
+    github_delivery_id = headers.get("x-github-delivery")
+    event_type = headers.get("x-github-event")
+    if not github_delivery_id or not event_type or not str(github_delivery_id).strip() or not str(event_type).strip():
+        elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+        log_event(
+            correlationId=correlation_id,
+            latencyMs=elapsed_ms,
+            result="invalid_payload",
+            errorClass="missing_github_headers",
+        )
+        return _json_response(400, {"status": "invalid_webhook"})
+
     body_hash = "sha256:" + hashlib.sha256(raw_bytes).hexdigest()
 
-    # Parse body as JSON from the raw bytes
+    # Step 6: Parse body as JSON from raw bytes
     try:
         parsed_body = json.loads(raw_bytes)
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -200,7 +311,7 @@ def lambda_handler(event, context):
         )
         return _json_response(400, {"status": "invalid_payload"})
 
-    # Require JSON root to be a dictionary/object (reject array, scalar, string, null)
+    # Step 7: Require JSON root to be an object (reject arrays, scalars, null)
     if not isinstance(parsed_body, dict):
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
         log_event(
@@ -214,11 +325,10 @@ def lambda_handler(event, context):
         )
         return _json_response(400, {"status": "invalid_payload"})
 
-    # Extract safe metadata from parsed body object
+    # Step 8: Extract safe metadata from authenticated and validated object
     meta = _extract_safe_metadata(parsed_body)
 
     elapsed_ms = int((time.perf_counter() - start_time) * 1000)
-
     log_event(
         githubDeliveryId=github_delivery_id,
         eventType=event_type,

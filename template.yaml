@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: GitHub Evalator — Webhook Ingress (T01)
+Description: GitHub Evalator — Webhook Ingress, HMAC Auth, & Authoritative State (T01-T03)
 
 Globals:
   Function:
@@ -8,15 +8,32 @@ Globals:
     MemorySize: 128
     Timeout: 10
 
+Parameters:
+  WebhookSecretArn:
+    Type: String
+    Description: AWS Secrets Manager ARN containing GitHub webhook secret
+    Default: "arn:aws:secretsmanager:us-east-1:123456789012:secret:github-evaluator-webhook-secret"
+
 Resources:
+  # Ingress API Gateway (T01)
   WebhookApi:
     Type: AWS::Serverless::HttpApi
 
+  # Ingress & HMAC Authentication Lambda (T01/T02)
   WebhookFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/webhook/
       Handler: handler.lambda_handler
+      Environment:
+        Variables:
+          GITHUB_WEBHOOK_SECRET_ARN: !Ref WebhookSecretArn
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref WebhookSecretArn
       Events:
         Webhook:
           Type: HttpApi
@@ -26,7 +43,31 @@ Resources:
             Method: POST
             PayloadFormatVersion: "2.0"
 
+  # Single-Table Authoritative State Model (T03)
+  StateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
 Outputs:
   WebhookUrl:
     Description: GitHub webhook ingress URL
     Value: !Sub "https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/webhook"
+  StateTableName:
+    Description: Authoritative single-table DynamoDB name
+    Value: !Ref StateTable

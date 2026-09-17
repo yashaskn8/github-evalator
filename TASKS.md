@@ -26,7 +26,7 @@
 
 ## T02 [P0] — HMAC Verification + Raw-Body Signature + Delivery Extraction
 
-- [ ] NOT STARTED
+- [ ] IMPLEMENTED — LIVE VERIFICATION PENDING
 
 | Field | Value |
 | :--- | :--- |
@@ -42,7 +42,7 @@
 
 ## T03 [P0] — DynamoDB Authoritative State Model
 
-- [ ] NOT STARTED
+- [ ] IMPLEMENTED — LIVE VERIFICATION PENDING
 
 | Field | Value |
 | :--- | :--- |
